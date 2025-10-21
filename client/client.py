@@ -1,7 +1,9 @@
 import argparse
 import glob
 import os
-from time import time
+import threading
+from time import time, sleep
+from typing import List
 import librosa
 import numpy as np
 import tritonclient.http as http_client
@@ -11,6 +13,8 @@ from pydub import AudioSegment
 
 MODEL_NAME = "turbo_cuda"
 TRITON_SERVER_URL = "localhost:8000"
+timeout_secs = 240
+gpu_hour_cost_dollars = 0.74
 
 def preprocess_audio(audio_path, audio_format):
     # Load audio
@@ -34,13 +38,61 @@ def preprocess_audio(audio_path, audio_format):
     length_seconds = len(audio) / sr
     return audio.astype(np.float32), length_seconds
 
+def asr_thread(filepath, file_type, results_list):
+    try:
+        client = http_client.InferenceServerClient(url=TRITON_SERVER_URL,
+            connection_timeout=timeout_secs,
+            network_timeout=timeout_secs)
+        # Preprocess audio
+        audio_input_data, length_seconds = preprocess_audio(filepath, file_type)
+        
+        # Create input tensor
+        inputs = [
+            http_client.InferInput(
+                "INPUT_0", audio_input_data.shape, "FP32"
+            )
+        ]
+        inputs[0].set_data_from_numpy(audio_input_data)
+
+        # Send request
+        infer_start_time = time()
+        results = client.infer(model_name=MODEL_NAME, inputs=inputs, 
+                               timeout=timeout_secs*1000)
+        infer_time_spent = time() - infer_start_time
+        print(f"Inference took {infer_time_spent} seconds")
+        print(f"Length of audio: {length_seconds} seconds")
+        speed = length_seconds / infer_time_spent
+        print(f"current speed: {speed} seconds per second")
+        hour_cost = gpu_hour_cost_dollars / speed
+        print(f"hour cost: {hour_cost} dollars per hour of transcription")
+
+        # Get output
+        output_data = results.as_numpy("OUTPUT_0")
+        transcription = output_data[0].decode('utf-8')
+        print(f"Transcription for {os.path.basename(filepath)}: {transcription}")
+
+        # Optionally, save transcription to a file
+        output_txt_file = os.path.splitext(filepath)[0] + ".txt"
+        with open(output_txt_file, "w", encoding="utf-8") as f:
+            f.write(transcription)
+        print(f"Transcription saved to {output_txt_file}")
+        results_list.append(length_seconds)
+
+    except Exception as e:
+        print(f"Error processing {filepath}: {e}")
+        
+        infer_time_spent = time() - infer_start_time
+        print(f"Inference took {infer_time_spent} seconds")
+        
+        results_list.append(length_seconds)
+
 def main():
     parser = argparse.ArgumentParser(description="Triton Whisper Client for WAV files.")
     parser.add_argument("directory", type=str, help="Directory containing .wav files.")
     args = parser.parse_args()
 
     wav_files = glob.glob(os.path.join(args.directory, "*.wav")) + glob.glob(os.path.join(args.directory, "*.WAV"))
-    timeout_secs = 240
+    
     if not wav_files:
         wav_files = []
     mp3_files = glob.glob(os.path.join(args.directory, "*.mp3")) + glob.glob(os.path.join(args.directory, "*.MP3"))
@@ -53,62 +105,29 @@ def main():
 
     print(f"Found {len(audio_files)} files. Sending to Triton server...")
 
-    client = http_client.InferenceServerClient(url=TRITON_SERVER_URL,
-        connection_timeout=timeout_secs,
-        network_timeout=timeout_secs)
-    seconds_transcribed = 0.0
-    seconds_of_inference = 0.0
-    gpu_hour_cost_dollars = 0.74
+    
     index = 0
+    threads: List[threading.Thread] = []
+    results = []
+    inferences_start = time()
     for filepath, file_type in audio_files:
-        print(f"Processing {filepath}...")
-        try:
-            # Preprocess audio
-            audio_input_data, length_seconds = preprocess_audio(filepath, file_type)
-            
-            # Create input tensor
-            inputs = [
-                http_client.InferInput(
-                    "INPUT_0", audio_input_data.shape, "FP32"
-                )
-            ]
-            inputs[0].set_data_from_numpy(audio_input_data)
+        print(f"Starting thread for {filepath}...")
 
-            # Send request
-            infer_start_time = time()
-            results = client.infer(model_name=MODEL_NAME, inputs=inputs, timeout=timeout_secs*1000)
-            infer_time_spent = time() - infer_start_time
-            print(f"Inference took {infer_time_spent} seconds")
-            print(f"Length of audio: {length_seconds} seconds")
-            if index > 1:
-                seconds_transcribed += length_seconds
-                seconds_of_inference += infer_time_spent
-            speed = length_seconds / infer_time_spent
-            print(f"current speed: {speed} seconds per second")
+        thread = threading.Thread(target=asr_thread, args=(filepath, file_type, results))
+        thread.start()
+        threads.append(thread)
+        sleep(1.0)
 
-            hour_cost = gpu_hour_cost_dollars / speed
-            print(f"hour cost: {hour_cost} dollars per hour of transcription")
-
-            # Get output
-            output_data = results.as_numpy("OUTPUT_0")
-            transcription = output_data[0].decode('utf-8')
-            print(f"Transcription for {os.path.basename(filepath)}: {transcription}")
-
-            # Optionally, save transcription to a file
-            output_txt_file = os.path.splitext(filepath)[0] + ".txt"
-            with open(output_txt_file, "w", encoding="utf-8") as f:
-                f.write(transcription)
-            print(f"Transcription saved to {output_txt_file}")
-
-        except Exception as e:
-            print(f"Error processing {filepath}: {e}")
-            
-            infer_time_spent = time() - infer_start_time
-            print(f"Inference took {infer_time_spent} seconds")
-            quit(1)
         index += 1
-    print("All files processed.")   
+    for thread in threads:
+        thread.join()
+    seconds_of_inference = time() - inferences_start
+    results = [res for res in results if res is not None]
+    seconds_transcribed = sum(results)
+    print("All files processed.")
     speed = seconds_transcribed / seconds_of_inference
+    print(f"Total transcription time: {seconds_of_inference} seconds")
+    print(f"Total audio transcribed: {seconds_transcribed} seconds")
     print(f"current speed: {speed} seconds per second")
 
     hour_cost = gpu_hour_cost_dollars / speed
