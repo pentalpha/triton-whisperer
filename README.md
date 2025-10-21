@@ -1,12 +1,12 @@
 # Triton Whisperer
 
-Repository which runs Whisper model inside a NVIDIA Triton container, reads .wav files in a mounted directory and creates .txt files with the transcriptions. By default, the triton container runs on CPU.
+Repository which runs Whisper model inside a NVIDIA Triton container. The client reads .wav files in a directory, send them to the container and creates .txt files with the transcriptions. By default, the triton container runs on CPU.
 
 ## Build Custom Container
 
 ```bash
 sudo docker build -t triton-whisper ./
-docker run -p8000:8000 -p8001:8001 -p8002:8002 -v ${PWD}/hf_models:/root/.cache/huggingface triton-whisper
+sudo docker run --runtime=nvidia --gpus all --shm-size 1G --rm -p8000:8000 -p8001:8001 -p8002:8002 -v ${PWD}/hf_models:/root/.cache/huggingface triton-whisper
 ```
 
 
