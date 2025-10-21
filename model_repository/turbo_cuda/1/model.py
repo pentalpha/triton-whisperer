@@ -1,16 +1,8 @@
 import json
 import sys
-from time import sleep
 import re
-
-#mp.set_start_method('spawn', force=True)
-#print("spawned")
-
 from time import time
 
-#import logging
-
-#import requests
 import numpy as np
 import triton_python_backend_utils as pb_utils
 
@@ -25,43 +17,15 @@ def load_whisper_cpu(model_name_str, lang):
 
 def load_whisper_cuda(model_name_str, lang):
     print(f'Loading whisper model {model_name_str}...')
-    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
-    import torch
+    from transformers import pipeline
 
     try:
-        '''torch.set_float32_matmul_precision("high")
-
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_name_str, torch_dtype=torch_dtype, low_cpu_mem_usage=True
-        ).to(device)
-
-        # Enable static cache and compile the forward pass
-        model.generation_config.cache_implementation = "static"
-        model.generation_config.max_new_tokens = 256
-        model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=True)
-
-
-        processor = AutoProcessor.from_pretrained(model_name_str)
-
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            return_timestamps=True,
-            torch_dtype=torch_dtype,
-            generate_kwargs={"language": lang},
-            device=device,
-        )'''
+        
         pipe = pipeline("automatic-speech-recognition", 
             model=model_name_str,
             return_timestamps=True,
             generate_kwargs={"language": lang},
             device='cuda')
-        #pipe.model.compile()
     except Exception as e:
         print(f"Error loading Whisper model {model_name_str}: {e}", file=sys.stderr)
         quit(1)
@@ -89,18 +53,9 @@ class TritonPythonModel:
         
         print('whisper_worker_process: Starting model loading')
         self.whisper_model = load_whisper_cuda(self.whisper_mname, self.language)
-        '''
-        from transformers import pipeline
-        self.whisper_model = pipeline("automatic-speech-recognition",
-                                      model=self.whisper_mname,
-                                      return_timestamps=True,
-                                      generate_kwargs={"language": self.language},
-                                      device='cpu')
-        '''
         print("Loaded whisper model!")
 
     def execute(self, requests):
-        from torch.nn.attention import SDPBackend, sdpa_kernel
         responses = []
         for request in requests:
             input_audio_tensor = pb_utils.get_input_tensor_by_name(request, "INPUT_0")
@@ -108,8 +63,7 @@ class TritonPythonModel:
 
             start_time = time()
             print("Starting transcription...")
-            # fast run
-            #with sdpa_kernel(SDPBackend.MATH):
+            
             result = self.whisper_model(audio_input_data)
             time_spent = time() - start_time
             print(f"Transcription took {time_spent} seconds")

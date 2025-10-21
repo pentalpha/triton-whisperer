@@ -14,7 +14,8 @@ from pydub import AudioSegment
 MODEL_NAME = "turbo_cuda"
 TRITON_SERVER_URL = "localhost:8000"
 timeout_secs = 240
-gpu_hour_cost_dollars = 0.74
+#Baseado em: https://cloud.google.com/products/calculator?hl=pt_br&dl=CjhDaVF6TXpZNFl6RmlNQzB6TnpSaUxUUTVNVEl0T0RWaVl5MWxNbVkzWW1VeFkyRmtaallRQVE9PRAIGiRDODBGMjI5RS02MjExLTQ5QUMtOUU2Ri0zNzBBRTJFODkyOEM
+gpu_hour_cost_dollars = 0.584
 
 def preprocess_audio(audio_path, audio_format):
     # Load audio
