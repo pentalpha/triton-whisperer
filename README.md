@@ -37,13 +37,19 @@ Before running the client script, ensure you have the necessary dependencies ins
 
 ```bash
 conda env create -n triton -f client/env.yaml
+conda activate triton
+```
+
+Or install packages in a local environment:
+
+```bash
+pip3 install librosa numpy soundfile pydub tritonclient[http] --break-system-packages
 ```
 
 #### Run the Client Script
 To use the client, provide the directory containing your `.wav` audio files:
 
 ```bash
-conda activate triton
 python3 client/client.py /path/to/your/audio_directory
 ```
 
