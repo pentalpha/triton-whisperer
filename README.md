@@ -1,8 +1,6 @@
 # Triton Whisperer
 
-Repository which runs Whisper model inside a NVIDIA Triton container. 
-The client reads .wav or .mp3 files in a directory, send them to the container and creates .txt files with the transcriptions. 
-The default model ("turbo_cuda") runs whisper-large-v3-turbo with two instances on a GPU.
+Repository which runs Whisper model inside a NVIDIA Triton container. The client reads .wav files in a directory, send them to the container and creates .txt files with the transcriptions. By default, the triton container runs on CPU.
 
 ## Build Custom Container
 
@@ -10,6 +8,7 @@ The default model ("turbo_cuda") runs whisper-large-v3-turbo with two instances 
 sudo docker build -t triton-whisper ./
 sudo docker run --runtime=nvidia --gpus all --shm-size 1G --rm -p8000:8000 -p8001:8001 -p8002:8002 -v ${PWD}/hf_models:/root/.cache/huggingface triton-whisper
 ```
+
 
 ### Model Repository Structure
 
@@ -36,25 +35,18 @@ This repository provides a `client.py` script to send `.wav` files for transcrip
 Before running the client script, ensure you have the necessary dependencies installed on your host machine (outside the Docker container):
 
 ```bash
-conda env create -n triton -f client/env.yaml
-conda activate triton
-```
-
-Or install packages in a local environment:
-
-```bash
-pip3 install librosa numpy soundfile pydub tritonclient[http] --break-system-packages
+pip install librosa tritonclient[http]
 ```
 
 #### Run the Client Script
 To use the client, provide the directory containing your `.wav` audio files:
 
 ```bash
-python3 client/client.py /path/to/your/audio_directory
+python3 client.py /path/to/your/audio_directory
 ```
 
 The script will:
-1.  Find all `.wav` and `.mp3` files in the specified directory.
+1.  Find all `.wav` files in the specified directory.
 2.  Preprocess each audio file to match the model's input requirements.
 3.  Send the preprocessed audio to the Triton server.
 4.  Receive the transcription from the server.

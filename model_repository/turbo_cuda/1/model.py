@@ -1,8 +1,16 @@
 import json
 import sys
+from time import sleep
 import re
+
+#mp.set_start_method('spawn', force=True)
+#print("spawned")
+
 from time import time
 
+#import logging
+
+#import requests
 import numpy as np
 import triton_python_backend_utils as pb_utils
 
@@ -20,20 +28,66 @@ def load_whisper_cuda(model_name_str, lang):
     from transformers import pipeline
 
     try:
-        
-        pipe = pipeline("automatic-speech-recognition", 
+        model = pipeline("automatic-speech-recognition", 
             model=model_name_str,
             return_timestamps=True,
-            generate_kwargs={"language": lang},
+            #generate_kwargs={"language": lang},
             device='cuda')
     except Exception as e:
         print(f"Error loading Whisper model {model_name_str}: {e}", file=sys.stderr)
-        quit(1)
         print('Falling back to CPU...', file=sys.stderr)
         # If CUDA is not available, load the model on CPU
-        pipe = load_whisper_cpu(model_name_str, lang)
+        model = load_whisper_cpu(model_name_str, lang)
     print('Loaded whisper model...')
-    return pipe
+    return model
+
+def whisper_worker_process(whisper_mname, audio_queue, result_queue, 
+        language):
+    # Cada worker carrega seu próprio modelo
+    #calls_being_processed_lockset[worker_index] = -1
+    print('whisper_worker_process: Starting model loading')
+    whisper_model = load_whisper_cuda(whisper_mname, language)
+
+    print('Loaded model!')
+    while True:
+        audio_id, id_emergencia, start_time, sampling_rate, audio_path = audio_queue.get()
+        try:
+            if audio_path == "STOP":
+                break
+            start_time = time()
+            result = whisper_model(audio_path)
+            time_spent = time() - start_time
+            transcript = result['text']
+            transcript = remove_duplicates_regex(transcript)
+            transcript = remove_duplicates_regex_simple(transcript)
+            result = {
+                'audio_id': audio_id,
+                'id_emergencia': id_emergencia,
+                'part': transcript,
+                'start_time': start_time,
+                'transcription_seconds': time_spent,
+                'transcription_model': whisper_mname
+            }
+            #print(f'result: {result}')
+            result_queue.put(result)
+        except Exception as err:
+            print(f'Error processing audio {audio_path}, removing processing_running flag')
+            print(f'transcript: {transcript}')
+            print(f'Erro: {err}')
+            print(err)
+            print(err.with_traceback(None))
+            result_queue.put({
+                'audio_id': audio_id,
+                'id_emergencia': id_emergencia,
+                'part': '',
+                'start_time': None,
+                'transcription_seconds': 0.0,
+                'transcription_model': whisper_mname,
+                "error": str(err)
+            })
+            sleep(5)
+
+        sleep(0.05)
 
 
 class TritonPythonModel:
@@ -47,12 +101,20 @@ class TritonPythonModel:
         )
 
         self.whisper_mname = "openai/whisper-large-v3-turbo"
-        self.language = "portuguese"
+        self.language = "pt"
 
         print(f"Loading whisper model {self.whisper_mname} with language {self.language}...")
         
         print('whisper_worker_process: Starting model loading')
         self.whisper_model = load_whisper_cuda(self.whisper_mname, self.language)
+        '''
+        from transformers import pipeline
+        self.whisper_model = pipeline("automatic-speech-recognition",
+                                      model=self.whisper_mname,
+                                      return_timestamps=True,
+                                      generate_kwargs={"language": self.language},
+                                      device='cpu')
+        '''
         print("Loaded whisper model!")
 
     def execute(self, requests):
@@ -63,17 +125,12 @@ class TritonPythonModel:
 
             start_time = time()
             print("Starting transcription...")
-            
             result = self.whisper_model(audio_input_data)
             time_spent = time() - start_time
             print(f"Transcription took {time_spent} seconds")
             transcript = result['text']
             transcript = self._remove_duplicates_regex(transcript)
             transcript = self._remove_duplicates_regex_simple(transcript)
-            while ',.' in transcript:
-                transcript = transcript.replace(',.', '.')
-            while ',,' in transcript:
-                transcript = transcript.replace(',,', ',')
 
             # Encode transcript to bytes for Triton output
             output_transcript = np.array([transcript.encode('utf-8')], dtype=self.output_dtype)
