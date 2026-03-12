@@ -1,3 +1,5 @@
 *.pyc
 hf_models/
 .env
+testing_bench/results/*.csv
+testing_bench/results/*.xlsx
