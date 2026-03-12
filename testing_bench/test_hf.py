@@ -300,6 +300,17 @@ if __name__ == "__main__":
         "openai/whisper-base",
         "dominguesm/whisper-tiny-pt",
         "openai/whisper-small",
+        "remynd/whisper-small-pt",
+        "thiagobarbosa/whisper-base-common-voice-16-pt-v6",
+        "openai/whisper-medium",
+        "remynd/whisper-medium-pt",
+        "pierreguillou/whisper-medium-portuguese",
+        "nilc-nlp/distil-whisper-coraa-mupe-asr",
+        "openai/whisper-large-v3-turbo",
+        "FastFlowLM/Whisper-V3-Turbo-NPU2",
+        "inesc-id/WhisperLv3-FT",
+        "openai/whisper-large-v3",
+        "remynd/whisper-large-v3-pt"
     ]
 
     eval_csv_paths = glob(os.path.join(results_dir, "eval_results.*.csv"))
