@@ -43,13 +43,17 @@ def normalize_light(text):
 
 def normalize_heavy(text):
     text = text.lower()
-    #remover caracteres especiais
+    # Remover caracteres especiais
     text = unidecode.unidecode(text)
-    # Remove toda a pontuação padrão
-    text = text.translate(str.maketrans('', '', string.punctuation))
+    
+    # FIX: Em vez de apenas remover a pontuação, substitua por espaço!
+    # Isso impede que falhas de espaçamento como "mordido?nao" virem "mordidonao"
+    text = text.translate(str.maketrans(string.punctuation, ' ' * len(string.punctuation)))
+    
     # Limpa espaços extras
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
+
 
 def intelligent_chunk_merge(chunks):
     if not chunks:
@@ -62,7 +66,6 @@ def intelligent_chunk_merge(chunks):
         curr = chunks[i].strip()
         
         # 1. Remove pontuações geradas por cortes abruptos nas bordas
-        # Ex: "precisar." ou "ju..." 
         prev_clean = re.sub(r'[\.\,\;\:\-\…]+$', '', prev)
         curr_clean = re.sub(r'^[\.\,\;\:\-\…]+', '', curr)
         
@@ -73,30 +76,26 @@ def intelligent_chunk_merge(chunks):
             last_word = prev_words[-1].lower()
             first_word = curr_words[0].lower()
             
-            # 2. Trata duplicações exatas (Ex: "ajudar" + "Ajudar" -> "ajudar")
+            # 2. Trata duplicações exatas
             if last_word == first_word:
                 curr_words.pop(0)
                 
-            # 3. Trata palavras fragmentadas pelo corte (Ex: "machuc" + "machuque")
+            # 3. Trata palavras fragmentadas pelo corte
             elif first_word.startswith(last_word) or last_word.startswith(first_word):
-                # Mantém a versão mais longa/completa da palavra e descarta o fragmento
                 if len(first_word) > len(last_word):
                     prev_words.pop()
                 else:
                     curr_words.pop(0)
                     
-        # Junta o texto limpo das pontuações anômalas nas bordas
+        # Junta o texto limpo
         prev_str = " ".join(prev_words)
         curr_str = " ".join(curr_words)
         
-        # 4. Ajusta a capitalização para decidir se foi uma quebra de frase ou continuação
+        # 4. Ajusta a capitalização para decidir se foi uma quebra de frase
         if curr_str:
             if curr_str[0].islower():
-                # É claramente a continuação da frase anterior (Ex: "precisar" + "de alguma coisa")
                 merged_text = prev_str + " " + curr_str
             else:
-                # O chunk começou com letra maiúscula. Assumimos nova frase.
-                # Restauramos o ponto final se a string original anterior tinha um.
                 if prev and prev[-1] in ".!?":
                     merged_text = prev_str + prev[-1] + " " + curr_str
                 else:
@@ -104,9 +103,20 @@ def intelligent_chunk_merge(chunks):
         else:
             merged_text = prev_str
 
-    # 5. Varredura final de limpeza (remove " . " isolados gerados na concatenação)
-    merged_text = re.sub(r'\s+([.,?!])', r'\1', merged_text) # remove espaço antes de pontuação
-    merged_text = re.sub(r'\.+', '.', merged_text) # normaliza pontos múltiplos
+    # 5. Varredura final de limpeza
+    # Remove espaço antes de pontuação
+    merged_text = re.sub(r'\s+([.,?!])', r'\1', merged_text) 
+    
+    # FIX: Garante que toda pontuação seja seguida de espaço se a próxima letra for texto
+    # Resolve os casos como: "acontecendo?Ajudar!" -> "acontecendo? Ajudar!"
+    merged_text = re.sub(r'([.!?,\:])([a-zA-ZÀ-ÿ])', r'\1 \2', merged_text)
+    
+    # FIX: Separa palavras coladas alucinadas pelo modelo em CamelCase 
+    # Resolve os casos como: "seVocê" -> "se Você"
+    merged_text = re.sub(r'([a-zà-ÿ])([A-ZÀ-Ÿ])', r'\1 \2', merged_text)
+    
+    # Limpa espaços extras que possam ter sido gerados nas etapas acima
+    merged_text = re.sub(r'\s+', ' ', merged_text)
     
     return merged_text.strip()
 
