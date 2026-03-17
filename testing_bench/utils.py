@@ -3,8 +3,9 @@ import re
 import unidecode
 import string
 import time
+import os
 
-from datasets import load_dataset, Audio
+from datasets import load_dataset, Audio, load_from_disk
 
 colunas = [
     "ID",
@@ -16,19 +17,29 @@ colunas = [
 hf_dataset = "pitagoras-alves/fake-emergencies-br"
 
 def get_inputs(max_n=4):
-    print("Downloading dataset...")
-    ds = load_dataset(
-        hf_dataset,
-        split=f"train[:{max_n}]",
-        streaming=False,
-        columns=colunas,
-    )#.take(max_n)
-    print("Casting audio column...")
-    ds = ds.cast_column("audio", Audio(sampling_rate=16000))
-    sample = next(iter(ds))["audio"]["array"]
-    print("Sample:", sample.shape)
-
-    return ds, sample
+    #Only load if a file with the correct sampling has not been sampled and saved yet
+    df_path = f"inputs/df_{max_n}.parquet"
+    if os.path.exists(df_path):
+        print(f"Loading from {df_path}")
+        ds = load_from_disk(df_path)
+        return ds
+    else:
+        print("Downloading dataset...")
+        ds = load_dataset(
+            hf_dataset,
+            split="train",
+            streaming=False,
+            columns=colunas,
+        )#.take(max_n)
+        ds = ds.shuffle(seed=1337)
+        ds = ds.select(range(max_n))
+        print("Casting audio column...")
+        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+        sample = next(iter(ds))["audio"]["array"]
+        print("Sample:", sample.shape)
+        os.makedirs("inputs", exist_ok=True)
+        ds.save_to_disk(df_path)
+        return ds
 
 def eval_transcriptions(pred, true):
     from evaluate import load
@@ -41,10 +52,16 @@ def normalize_light(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def normalize_heavy(text):
+def normalize_special(text):
     text = text.lower()
     # Remover caracteres especiais
     text = unidecode.unidecode(text)
+    # Limpa espaços extras
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+def normalize_punct(text):
+    text = text.lower()
     
     # FIX: Em vez de apenas remover a pontuação, substitua por espaço!
     # Isso impede que falhas de espaçamento como "mordido?nao" virem "mordidonao"
@@ -53,7 +70,6 @@ def normalize_heavy(text):
     # Limpa espaços extras
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
-
 
 def intelligent_chunk_merge(chunks):
     if not chunks:
@@ -136,3 +152,70 @@ def clean_reference_text(text):
     clean_text = re.sub(r'\s+', ' ', clean_text)
     
     return clean_text.strip()
+
+def remove_duplicates_regex(text: str, max_ngram: int = 5) -> str:
+    """
+    Remove repetições consecutivas de n-gramas (1..max_ngram).
+    Ex.: "fez a de fez a de fez a de" -> "fez a de"
+    Mantém separadores (pontuação/espacos) na medida do possível.
+    """
+
+    if not text or text.strip() == "":
+        return text
+
+    # Tokeniza em palavras (\w+) e não-palavras (separadores)
+    tokens = re.findall(r'\w+|\W+', text, flags=re.UNICODE)
+    word_indices = [i for i, tok in enumerate(tokens) if re.match(r'\w+', tok, flags=re.UNICODE)]
+    words = [tokens[i] for i in word_indices]
+    lower_words = [w.lower() for w in words]
+
+    if not words:
+        return text
+
+    keep_word = [True] * len(words)
+    i = 0
+    L = len(words)
+
+    while i < L:
+        matched = False
+        # tenta maiores n-grams primeiro
+        max_n = min(max_ngram, L - i)
+        for n in range(max_n, 0, -1):
+            seq = tuple(lower_words[i:i + n])
+            j = i + n
+            # conta quantas vezes a seq se repete consecutivamente
+            while j + n <= L and tuple(lower_words[j:j + n]) == seq:
+                j += n
+            if j > i + n:
+                # houve repetição: marca palavras repetidas para remoção
+                for k in range(i + n, j):
+                    keep_word[k] = False
+                i = j  # pula bloco repetido
+                matched = True
+                break
+        if not matched:
+            i += 1
+
+    # Reconstrói texto: mantém separadores e apenas palavras marcadas
+    out = []
+    widx = 0
+    for idx, tok in enumerate(tokens):
+        if re.match(r'\w+', tok, flags=re.UNICODE):
+            if keep_word[widx]:
+                out.append(tok)
+            # se palavra removida, não append; mantemos separadores seguintes normalmente
+            widx += 1
+        else:
+            out.append(tok)
+
+    result = ''.join(out)
+    # Normaliza espaços extras introduzidos pela remoção
+    result = re.sub(r'\s{2,}', ' ', result)
+    # Remove espaço antes de pontuação (opcional, melhora saída)
+    result = re.sub(r'\s+([,.;:!?])', r'\1', result)
+    return result.strip()
+
+def normalize_repeats(seq):
+    no_dups1 = remove_duplicates_regex(seq)
+    no_dups2 = re.sub(r'\b(\w+)(?:\W+\1\b)+', r'\1', no_dups1, flags=re.IGNORECASE)
+    return no_dups2

@@ -7,6 +7,7 @@ import unidecode
 from glob import glob
 import gc
 import traceback
+import json
 
 from tqdm import tqdm
 import string
@@ -14,207 +15,37 @@ import string
 import pandas as pd
 
 from utils import (get_inputs, eval_transcriptions, intelligent_chunk_merge, 
-    clean_reference_text, normalize_light, normalize_heavy)
+    clean_reference_text, 
+    normalize_light, normalize_special, normalize_punct, normalize_repeats)
 
+from torch_asr_utils import (fix_whisper_generation_config, process_with_pipeline, 
+    load_pipeline, load_asr_generator)
 
-def fix_whisper_generation_config(model, model_name_str):
-    """Injects missing generation_config parameters into community models."""
-    from transformers import GenerationConfig
+'''"ibm-granite/granite-4.0-1b-speech",
     
-    # Verifica se a configuração atual está quebrada/incompleta
-    if getattr(model.generation_config, "no_timestamps_token_id", None) is None:
-        # Tenta adivinhar o modelo base pelo nome
-        name_lower = model_name_str.lower()
-        base_id = "openai/whisper-base" # fallback padrão
-        
-        if "tiny" in name_lower: base_id = "openai/whisper-tiny"
-        elif "small" in name_lower: base_id = "openai/whisper-small"
-        elif "medium" in name_lower: base_id = "openai/whisper-medium"
-        elif "large" in name_lower: base_id = "openai/whisper-large-v2"
-        
-        # Puxa a configuração imaculada da OpenAI e sobrescreve a do modelo problemático
-        print(f"Fixing generation_config for {model_name_str} using {base_id} as template...")
-        model.generation_config = GenerationConfig.from_pretrained(base_id)
-        
-    return model
+    "nvidia/canary-1b-flash",
+    "nvidia/canary-qwen-2.5b",
+    "nvidia/parakeet-tdt-0.6b-v3",
+    "nvidia/parakeet-tdt-0.6b-v2",
+    "microsoft/Phi-4-multimodal-instruct",'''
 
-'''def load_asr_generator(model_name_str, device):
-    model_family = "whisper"
-    if "mms" in model_name_str:
-        model_family = "mms"
-    
-    if model_family == "whisper":
-        from transformers import WhisperProcessor, WhisperForConditionalGeneration
-        processor = WhisperProcessor.from_pretrained(model_name_str)
-        model = WhisperForConditionalGeneration.from_pretrained(model_name_str).to(device)
-        
-        # Aplica a correção da configuração
-        model = fix_whisper_generation_config(model, model_name_str)
-        
-    elif model_family == "mms":
-        from transformers import Wav2Vec2ForCTC, AutoProcessor
-        processor = AutoProcessor.from_pretrained(model_name_str)
-        model = Wav2Vec2ForCTC.from_pretrained(model_name_str).to(device)
-    else:
-        from transformers import AutoProcessor, AutoModelForSeq2SeqLM
-        processor = AutoProcessor.from_pretrained(model_name_str)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name_str).to(device)
-        
-    return processor, model
-
-def load_whisper(model_name_str, device, lang="portuguese"):
-    from transformers import pipeline
-    
-    if "whisper" in model_name_str.lower():
-        from transformers import WhisperProcessor, WhisperForConditionalGeneration
-        # Para consertar o pipeline, precisamos carregar o modelo explicitamente primeiro
-        processor = WhisperProcessor.from_pretrained(model_name_str)
-        model_obj = WhisperForConditionalGeneration.from_pretrained(model_name_str)
-        
-        # Aplica a correção da configuração
-        model_obj = fix_whisper_generation_config(model_obj, model_name_str)
-        
-        # Passa os objetos corrigidos para o pipeline ao invés da string
-        model = pipeline(
-            "automatic-speech-recognition", 
-            model=model_obj,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            return_timestamps=True,
-            generate_kwargs={"language": lang},
-            device=device
-        )
-    elif "mms" in model_name_str.lower():
-        model = pipeline(
-            "automatic-speech-recognition", 
-            model=model_name_str,
-            return_timestamps='word',
-            generate_kwargs={"language": lang},
-            device=device
-        )
-        
-    else:
-        model = pipeline(
-            "automatic-speech-recognition", 
-            model=model_name_str,
-            return_timestamps=True,
-            generate_kwargs={"language": lang},
-            device=device
-        )
-        
-    return model'''
-
-
-def process_with_pipeline(model, audio_array):
-    result = model(audio_array)
-    out_text = result["text"]
-    return out_text
-
-def load_asr_generator(model_name_str, device):
-    from transformers.utils import logging as hf_logging
-    hf_logging.set_verbosity_error()
-    
-    # FIX: Carregar sempre em float16 na GPU para evitar OOM
-    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    
-    model_family = "whisper"
-    if "mms" in model_name_str.lower():
-        model_family = "mms"
-    
-    if model_family == "whisper":
-        from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
-        processor = AutoProcessor.from_pretrained(model_name_str)
-        # Injeta o torch_dtype e low_cpu_mem_usage
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_name_str, 
-            torch_dtype=torch_dtype, 
-            low_cpu_mem_usage=True
-        ).to(device)
-        model = fix_whisper_generation_config(model, model_name_str)
-        
-    elif model_family == "mms":
-        from transformers import Wav2Vec2ForCTC, AutoProcessor
-        processor = AutoProcessor.from_pretrained(model_name_str)
-        model = Wav2Vec2ForCTC.from_pretrained(
-            model_name_str, 
-            torch_dtype=torch_dtype, 
-            low_cpu_mem_usage=True
-        ).to(device)
-    else:
-        from transformers import AutoProcessor, AutoModelForSeq2SeqLM
-        processor = AutoProcessor.from_pretrained(model_name_str)
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_name_str, 
-            torch_dtype=torch_dtype, 
-            low_cpu_mem_usage=True
-        ).to(device)
-        
-    hf_logging.set_verbosity_warning()
-    return processor, model
-
-def load_whisper(model_name_str, device, lang="portuguese"):
-    from transformers import pipeline, AutoProcessor, AutoModelForSpeechSeq2Seq
-    from transformers.utils import logging as hf_logging
-    
-    hf_logging.set_verbosity_error()
-    name_lower = model_name_str.lower()
-    
-    # FIX: Precisão para não estourar a VRAM
-    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    
-    batch_size = 8
-    
-    if "whisper" in name_lower:
-        processor = AutoProcessor.from_pretrained(model_name_str)
-        model_obj = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_name_str, 
-            torch_dtype=torch_dtype, 
-            low_cpu_mem_usage=True
-        ).to(device)
-        model_obj = fix_whisper_generation_config(model_obj, model_name_str)
-        
-        timestamps_param = "word" if "crisper" in name_lower else True
-        
-        model = pipeline(
-            "automatic-speech-recognition", 
-            model=model_obj,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            return_timestamps=timestamps_param,
-            chunk_length_s=30,
-            batch_size=batch_size,
-            torch_dtype=torch_dtype,
-            # FIX: Adicionado "task": "transcribe" para evitar traduções fantasmas!
-            generate_kwargs={"language": lang, "task": "transcribe"},
-            device=device,
-            language=lang,
-            #task="transcribe"
-        )
-    elif "mms" in name_lower:
-        model = pipeline(
-            "automatic-speech-recognition", 
-            model=model_name_str,
-            return_timestamps='word',
-            chunk_length_s=30,
-            batch_size=batch_size,
-            torch_dtype=torch_dtype,
-            generate_kwargs={"language": lang}, # MMS não usa "task"
-            device=device
-        )
-    else:
-        model = pipeline(
-            "automatic-speech-recognition", 
-            model=model_name_str,
-            return_timestamps=True,
-            chunk_length_s=30,
-            batch_size=batch_size,
-            torch_dtype=torch_dtype,
-            generate_kwargs={"language": lang},
-            device=device
-        )
-        
-    hf_logging.set_verbosity_warning()
-    return model
+hf_models = [
+    #"ibm-granite/granite-4.0-1b-speech",
+    "facebook/mms-1b-all",
+    "pierreguillou/whisper-medium-portuguese",
+    "nilc-nlp/distil-whisper-coraa-mupe-asr",
+    "openai/whisper-large-v3-turbo",
+    "openai/whisper-large-v3",
+    "remynd/whisper-large-v3-pt",
+    "openai/whisper-base",
+    "dominguesm/whisper-tiny-pt",
+    "openai/whisper-small",
+    "remynd/whisper-small-pt",
+    "openai/whisper-medium",
+    "remynd/whisper-medium-pt",
+    "Qwen/Qwen3-ASR-1.7B",
+    "Qwen/Qwen3-ASR-0.6B",
+]
 
 def process_low_level(model, processor, audio_array, sr, make_chunks=False):
     from transformers import Wav2Vec2ForCTC
@@ -277,51 +108,70 @@ def process_low_level(model, processor, audio_array, sr, make_chunks=False):
         gpu_time_sum = 0.0
         transcribed_chunks = []
         
-        for i in range(0, len(audio_array), chunk_samples):
-            chunk = audio_array[i : i + chunk_samples]
-            
-            start_time = time.time()
-            inputs = processor(
-                chunk, 
-                sampling_rate=sr, 
-                return_tensors="pt",
-                return_attention_mask=True 
-            ).to(model.device)
-            gpu_time_sum += time.time() - start_time
-
-            if "input_features" in inputs:
-                inputs["input_features"] = inputs["input_features"].to(model.dtype)
-            if "input_values" in inputs:
-                inputs["input_values"] = inputs["input_values"].to(model.dtype)
-            
-            with torch.no_grad():
+        if processor is not None:
+            for i in range(0, len(audio_array), chunk_samples):
+                chunk = audio_array[i : i + chunk_samples]
+                
+                # FIX: Skip extremely short trailing chunks that break Wav2Vec2 convolutions
+                if len(chunk) < (0.1 * sr): 
+                    continue
                 start_time = time.time()
-                if is_mms:
-                    logits = model(**inputs).logits
-                    predicted_ids = torch.argmax(logits, dim=-1)
-                else:
-                    predicted_ids = model.generate(
-                        **inputs,
-                        return_timestamps=timestamps_param,
-                        language="portuguese", task="transcribe"
-                    )
+                inputs = processor(
+                    chunk, 
+                    sampling_rate=sr, 
+                    return_tensors="pt",
+                    return_attention_mask=True 
+                ).to(model.device)
                 gpu_time_sum += time.time() - start_time
+
+                if "input_features" in inputs:
+                    inputs["input_features"] = inputs["input_features"].to(model.dtype)
+                if "input_values" in inputs:
+                    inputs["input_values"] = inputs["input_values"].to(model.dtype)
             
-            chunk_text = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-            transcribed_chunks.append(chunk_text.strip())
+                with torch.no_grad():
+                    start_time = time.time()
+                    if is_mms:
+                        logits = model(**inputs).logits
+                        predicted_ids = torch.argmax(logits, dim=-1)
+                    else:
+                        predicted_ids = model.generate(
+                            **inputs,
+                            return_timestamps=timestamps_param,
+                            language="portuguese", task="transcribe"
+                        )
+                    gpu_time_sum += time.time() - start_time
+
+                    chunk_text = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+                    transcribed_chunks.append(chunk_text.strip())
+        else:
+            #TODO: test multiple chunks
+            chunks = [(audio_array[i : i + chunk_samples], sr) 
+                      for i in range(0, len(audio_array), chunk_samples)]
+            start_time = time.time()
+            results = model.transcribe(
+                audio=chunks,
+                language="Portuguese",
+            )
+            gpu_time_sum += time.time() - start_time
+            out_texts = [r.text.strip() for r in results]
+            transcribed_chunks.extend(out_texts)
             
         out_text = intelligent_chunk_merge(transcribed_chunks)
+        print(out_text)
         
     return out_text, gpu_time_sum
 
-def test_model(model_id, n_samples, device):
+def test_model(model_id, n_samples, device, cache_dir=".asr_cache"):
+    model_cache = os.path.join(cache_dir, model_id.replace('/', '_'))
+    os.makedirs(model_cache, exist_ok=True)
     print(f"Testing model {model_id} on {n_samples} samples...")
     n_for_speedup_test = int(n_samples*0.05)
     if n_for_speedup_test < 5:
         n_for_speedup_test = 5
-    model = load_whisper(model_id, device)
+    model = load_pipeline(model_id, device)
 
-    ds, sample = get_inputs(max_n=n_samples)
+    ds = get_inputs(max_n=n_samples)
     original_scripts = ds["roteiro_segmentado"]
 
     transcriptions = []
@@ -334,19 +184,48 @@ def test_model(model_id, n_samples, device):
 
     lines_for_low_level_eval = []
     for item in tqdm(ds):
+        id_str = item["ID"]
         audio = item["audio"]
         audio_array = audio["array"]
         sr = audio["sampling_rate"]
         audio_len_secs = len(audio_array) / sr
 
-        time_start = time.time()
+        audio_name = item["ID"] + "_" + item["modelo_audio"]
+
+        cached_path = os.path.join(model_cache, audio_name + ".json")
+        loaded_cache = False
+        if os.path.exists(cached_path):
+            try:
+                with open(cached_path, "r") as f:
+                    result = json.load(f)
+                    out_text = result["text"]
+                    processing_time = result["processing_time"]
+                    loaded_cache = True
+            except json.JSONDecodeError as e:
+                print(f"Error loading {cached_path}: {e}")
+                os.remove(cached_path)
+                out_text = None
+                processing_time = None
         
-        result = model(audio_array)
-        out_text = result["text"].strip()
-        if len(out_text) == 0:
-            print("Empty transcription")
-            raise ValueError("Empty transcription")
-        processing_times.append(time.time() - time_start)
+        if not loaded_cache:
+            time_start = time.time()
+            out_text = process_with_pipeline(model_id, model, audio_array)
+            if len(out_text) == 0:
+                print("Empty transcription")
+                raise ValueError("Empty transcription")
+            processing_time = time.time() - time_start
+
+            if "qwen" in model_id.lower() or "granite" in model_id.lower():
+                print("Original:")
+                print(original_scripts[line_n])
+                print("Transcribed:")
+                print(out_text)
+                
+
+            obj = {"text": out_text, "processing_time": processing_time}
+            #print(f"Saving {cached_path} -> {obj}")
+            json.dump(obj, open(cached_path, "w"), ensure_ascii=False)
+        processing_times.append(processing_time)
         
         transcriptions.append(out_text)
         
@@ -354,11 +233,11 @@ def test_model(model_id, n_samples, device):
         texts_segmented.append(original_text)
         audio_lens.append(audio_len_secs)
 
-        print("Original:")
+        '''print("Original:")
         print(original_text)
         print("Transcribed:")
         print(out_text)
-        print()
+        print()'''
 
         if line_n < n_for_speedup_test:
             lines_for_low_level_eval.append(
@@ -390,17 +269,33 @@ def test_model(model_id, n_samples, device):
         texts_joined.append(ref_clean)
     
     texts_original_norm = [normalize_light(t) for t in texts_joined]
-    texts_original_simplified = [normalize_heavy(t) for t in texts_joined]
+    texts_original_special = [normalize_special(t) for t in texts_original_norm]
+    texts_original_punct = [normalize_punct(t) for t in texts_original_norm]
+    texts_original_repeats = [normalize_repeats(t) for t in texts_original_norm]
 
-    transcribed_norm = [normalize_light(t) for t in transcriptions]
-    transcribed_simplified = [normalize_heavy(t) for t in transcriptions]
+    transcribed_norms = [normalize_light(t) for t in transcriptions]
+    transcribed_specials = [normalize_special(t) for t in transcribed_norms]
+    transcribed_puncts = [normalize_punct(t) for t in transcribed_norms]
+    transcribed_repeats = [normalize_repeats(t) for t in transcribed_norms]
 
     raw_result_lines = []
-    iterator = zip(audio_lens, texts_original_norm, texts_original_simplified, 
-        transcribed_norm, transcribed_simplified, processing_times)
-    for obj in tqdm(iterator):
-        audio_len, original_norm, original_simple, transcribed_norm, transcribed_simple, processing_time = obj
-        print("Original (norm):")
+    for index in range(len(texts_joined)):
+        text_joined = texts_joined[index]
+        transcription = transcriptions[index]
+        audio_len = audio_lens[index]
+        original_norm = texts_original_norm[index]
+        original_special = texts_original_special[index]
+        original_punct = texts_original_punct[index]
+        original_repeats = texts_original_repeats[index]
+
+        transcribed_norm = transcribed_norms[index]
+        transcribed_special = transcribed_specials[index]
+        transcribed_punct = transcribed_puncts[index]
+        transcribed_repeat = transcribed_repeats[index]
+
+        processing_time = processing_times[index]
+        weight = len(original_norm) / 100
+        '''print("Original (norm):")
         print(original_norm)
         print("Original (simple):")
         print(original_simple)
@@ -408,40 +303,66 @@ def test_model(model_id, n_samples, device):
         print(transcribed_norm)
         print("Transcribed (simple):")
         print(transcribed_simple)
-        print()
+        print()'''
 
         raw_result_lines.append({
             "audio_len": audio_len,
             "processing_time": processing_time,
+            "weight": weight,
+            "original": text_joined,
             "original_norm": original_norm,
-            "original_simple": original_simple,
+            "original_special": original_special,
+            "original_punct": original_punct,
+            "original_repeats": original_repeats,
+            "transcribed": transcription,
             "transcribed_norm": transcribed_norm,
-            "transcribed_simple": transcribed_simple
+            "transcribed_special": transcribed_special,
+            "transcribed_punct": transcribed_punct,
+            "transcribed_repeats": transcribed_repeat,
         })
     
     print("Evaluating speed on splitted audio chunks...")
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
 
-    processor, model = load_asr_generator(model_id, device)
-    new_proc_times = []
-    for original_text, audio_array, processing_time in tqdm(lines_for_low_level_eval):
-        time_start = time.time()
-        out_text, gpu_time = process_low_level(model, processor, audio_array, 
-            sr, make_chunks=True)
-        processing_time2 = time.time() - time_start
-        new_proc_times.append(gpu_time)
+    #if not("qwen" in model_id.lower()):
+        
+    inf_speed_test_cache_path = os.path.join(model_cache, f"inf_speed_test_{n_samples}.json")
+    if os.path.exists(inf_speed_test_cache_path):
+        with open(inf_speed_test_cache_path, "r") as f:
+            inf_speed_test_cache = json.load(f)
+    else:
+        if "qwen" not in model_id.lower():
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+            processor, model = load_asr_generator(model_id, device)
+        else:
+            processor = None
+        inf_speed_test_cache = []
+        for original_text, audio_array, _ in tqdm(lines_for_low_level_eval):
+            out_text, gpu_time = process_low_level(model, processor, audio_array, 
+                sr, make_chunks=True)
+            inf_speed_test_cache.append({
+                "audio_len": audio_len,
+                "original": original_text,
+                "transcribed": out_text,
+                "processing_time": gpu_time,
+            })
+        with open(inf_speed_test_cache_path, "w") as f:
+            json.dump(inf_speed_test_cache, f)
+        del model
+        del processor
+        gc.collect()
+        torch.cuda.empty_cache()
+    '''else:
+        inf_speed_test_cache = [
+            {"processing_time": t} for _, _, t in lines_for_low_level_eval
+        ]'''
     
     full_audio_times = sum([line[-1] for line in lines_for_low_level_eval])
+    new_proc_times = [line["processing_time"] for line in inf_speed_test_cache]
     chunked_audio_times = sum(new_proc_times)
     speedup = full_audio_times / chunked_audio_times
     print(f"Speedup: {speedup:.2f}x")
-
-    del model
-    del processor
-    gc.collect()
-    torch.cuda.empty_cache()
 
     return raw_result_lines, speedup
 
@@ -463,82 +384,72 @@ def save_results(raw_result_lines):
     eval_lines = []
 
     for model_id, model_lines in df.groupby('model_id'):
+        print(f"Evaluating {model_id}...")
         transcribed_norm = model_lines['transcribed_norm'].tolist()
-        transcribed_simplified = model_lines['transcribed_simple'].tolist()
         texts_original_norm = model_lines['original_norm'].tolist()
-        texts_original_simplified = model_lines['original_simple'].tolist()
+
+        transcribed_special = model_lines['transcribed_special'].tolist()
+        texts_original_special = model_lines['original_special'].tolist()
+
+        transcribed_punct = model_lines['transcribed_punct'].tolist()
+        texts_original_punct = model_lines['original_punct'].tolist()
+
+        transcribed_repeats = model_lines['transcribed_repeats'].tolist()
+        texts_original_repeats = model_lines['original_repeats'].tolist()
 
         wer_norm = eval_transcriptions(transcribed_norm, texts_original_norm)
-        wer_simple = eval_transcriptions(transcribed_simplified, texts_original_simplified)
-        print(f"Final WER (norm): {wer_norm}")
-        print(f"Final WER (simple): {wer_simple}")
+        wer_special = eval_transcriptions(transcribed_special, texts_original_special)
+        wer_punct = eval_transcriptions(transcribed_punct, texts_original_punct)
+        wer_repeats = eval_transcriptions(transcribed_repeats, texts_original_repeats)
+        print(f"\tFinal WER (basic norm): {wer_norm}")
+        print(f"\tFinal WER (special): {wer_special}")
+        print(f"\tFinal WER (punct): {wer_punct}")
+        print(f"\tFinal WER (repeats): {wer_repeats}")
 
         total_audio_seconds = model_lines['audio_len'].sum()
         seconds_sum_original = model_lines['processing_time'].sum()
         seconds_sum_chunked = (model_lines['processing_time'] / model_lines['chunking_speedup']).sum()
-        speed_not_optimized = total_audio_seconds / seconds_sum_original
+        speed_pipeline = total_audio_seconds / seconds_sum_original
         #In a real scenario, the audio would arrive already chunked.
         #Because of this, we need to estimate what would be the total processing time if the audio was already in small chunks.
         #To do this, we divide the processing time by the speedup factor.
-        speed_optimized = total_audio_seconds / seconds_sum_chunked
+        speed_chunks = total_audio_seconds / seconds_sum_chunked
 
         eval_lines.append({
             "model_id": model_id,
-            "wer_norm": wer_norm,
-            "wer_simple": wer_simple,
+            "wer_basic_norm": wer_norm,
+            "wer_special": wer_special,
+            "wer_punct": wer_punct,
+            "wer_repeats": wer_repeats,
             "total_audio_seconds": total_audio_seconds,
-            "seconds_sum_original": seconds_sum_original,
-            "seconds_sum_chunked": seconds_sum_chunked,
-            "speed_not_optimized": speed_not_optimized,
-            "speed_optimized": speed_optimized,
+            "total_seconds_pipeline": seconds_sum_original,
+            "total_seconds_chunks": seconds_sum_chunked,
+            "speed_pipeline": speed_pipeline,
+            "speed_chunks": speed_chunks,
             "n_samples": len(model_lines)
         })
     
     eval_df = pd.DataFrame(eval_lines)
     #sort df by wer_norm
-    eval_df = eval_df.sort_values(by='wer_norm')
+    eval_df = eval_df.sort_values(by='wer_basic_norm')
     eval_df.to_csv(f"{eval_basename}.csv", index=False)
     eval_df.to_excel(f"{eval_basename}.xlsx", index=False)
 
 if __name__ == "__main__":
     # 1. Load the generic processor and model
-    n_samples_to_test = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+    n_samples_to_test = int(sys.argv[1]) if len(sys.argv) > 1 else 429
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     results_dir = "results"
     os.makedirs(results_dir, exist_ok=True)
-
-    '''"ibm-granite/granite-4.0-1b-speech",
-        "Qwen/Qwen3-ASR-0.6B",
-        "Qwen/Qwen3-ASR-1.7B",
-        "nvidia/canary-1b-flash",
-        "nvidia/canary-qwen-2.5b",
-        "nvidia/parakeet-tdt-0.6b-v3",
-        "nvidia/parakeet-tdt-0.6b-v2",
-        "microsoft/Phi-4-multimodal-instruct",'''
-    hf_models = [
-        #"nyrahealth/CrisperWhisper",
-        "facebook/mms-1b-all",
-        #"inesc-id/WhisperLv3-FT",
-        #"thiagobarbosa/whisper-base-common-voice-16-pt-v6",
-        "pierreguillou/whisper-medium-portuguese",
-        "nilc-nlp/distil-whisper-coraa-mupe-asr",
-        "openai/whisper-large-v3-turbo",
-        "openai/whisper-large-v3",
-        "remynd/whisper-large-v3-pt",
-        "openai/whisper-base",
-        "dominguesm/whisper-tiny-pt",
-        "openai/whisper-small",
-        "remynd/whisper-small-pt",
-        "openai/whisper-medium",
-        "remynd/whisper-medium-pt",
-    ]
 
     eval_csv_paths = glob(os.path.join(results_dir, "eval_results.*.csv"))
     previous_n_samples_of_models = {}
     for prev_csv in eval_csv_paths:
         eval_df = pd.read_csv(prev_csv)
         for _, row in eval_df.iterrows():
-            wer_norm = row['wer_norm']
+            if "wer_basic_norm" not in row:
+                continue
+            wer_norm = row['wer_basic_norm']
             if wer_norm > 0.75:
                 continue
             else:
@@ -561,7 +472,7 @@ if __name__ == "__main__":
     
     all_raw_results = []
 
-    for model_id in hf_models_to_test:
+    for model_id in hf_models:
         try:
             raw_result_lines, speedup = test_model(model_id, n_samples_to_test, device)
             for line in raw_result_lines:
@@ -573,6 +484,6 @@ if __name__ == "__main__":
             print(f"Error testing model {model_id}: {e}")
             print(e)
             print(traceback.format_exc())
-            continue
+            quit(1)
     
     
