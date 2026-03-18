@@ -1,0 +1,16 @@
+{
+    "cpu8_gput4_mem30gb": {
+        "aws": {
+            "on_demand": 0.752,
+            "spot": 0.256
+        },
+        "gcp": {
+            "on_demand": 0.71,
+            "spot": 0.27
+        },
+        "azure": {
+            "on_demand": 0.71,
+            "spot": 0.26
+        }
+    }
+}

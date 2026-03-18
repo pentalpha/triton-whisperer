@@ -21,8 +21,7 @@ from utils import (get_inputs, eval_transcriptions, intelligent_chunk_merge,
 from torch_asr_utils import (fix_whisper_generation_config, process_with_pipeline, 
     load_pipeline, load_asr_generator)
 
-'''"ibm-granite/granite-4.0-1b-speech",
-    
+'''"ibm-granite/granite-4.0-1b-speech",#cannot use HF pipeline, not implemented
     "nvidia/canary-1b-flash",
     "nvidia/canary-qwen-2.5b",
     "nvidia/parakeet-tdt-0.6b-v3",
@@ -30,21 +29,20 @@ from torch_asr_utils import (fix_whisper_generation_config, process_with_pipelin
     "microsoft/Phi-4-multimodal-instruct",'''
 
 hf_models = [
-    #"ibm-granite/granite-4.0-1b-speech",
+    "Qwen/Qwen3-ASR-0.6B",
+    "Qwen/Qwen3-ASR-1.7B",
     "facebook/mms-1b-all",
     "pierreguillou/whisper-medium-portuguese",
     "nilc-nlp/distil-whisper-coraa-mupe-asr",
     "openai/whisper-large-v3-turbo",
     "openai/whisper-large-v3",
-    "remynd/whisper-large-v3-pt",
+    #"remynd/whisper-large-v3-pt", # not enough memory
     "openai/whisper-base",
     "dominguesm/whisper-tiny-pt",
     "openai/whisper-small",
     "remynd/whisper-small-pt",
     "openai/whisper-medium",
     "remynd/whisper-medium-pt",
-    "Qwen/Qwen3-ASR-1.7B",
-    "Qwen/Qwen3-ASR-0.6B",
 ]
 
 def process_low_level(model, processor, audio_array, sr, make_chunks=False):

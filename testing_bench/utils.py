@@ -4,7 +4,7 @@ import unidecode
 import string
 import time
 import os
-
+from rapidfuzz import fuzz
 from datasets import load_dataset, Audio, load_from_disk
 
 colunas = [
@@ -50,6 +50,46 @@ def normalize_light(text):
     text = text.lower()
     # Limpa espaços extras
     text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+def normalize_smart_light(text):
+    """
+    Simplifies structural punctuation and ASR formatting artifacts 
+    without losing accents, questions, or exclamations.
+    """
+    if not isinstance(text, str):
+        return ""
+        
+    text = text.lower()
+    
+    # 1. Remove parentheses and brackets
+    # The original scripts have stage directions like "(Choro fraco)".
+    # The ASR transcribes the words but omits the brackets. 
+    text = re.sub(r'[\(\)\[\]\{\}]', '', text)
+    
+    # 2. Replace ellipses and hyphens with spaces
+    # ASR models usually ignore hyphens ("vira-lata" -> "vira lata", "MG-230" -> "mg 230")
+    # Ellipses in the reference text usually indicate pauses, which ASR interprets as space.
+    text = re.sub(r'\.{2,}', ' ', text)
+    text = re.sub(r'-', ' ', text)
+    
+    # 3. Strip quotation marks and apostrophes
+    # These rarely impact spoken-word semantics in this context.
+    text = re.sub(r'[\'\"”"“‘`]', '', text)
+    
+    # 4. Collapse repeated terminal punctuation
+    # Converts panicked typing like "Ajudar!!!" into "Ajudar!"
+    text = re.sub(r'\!+', '!', text)
+    text = re.sub(r'\?+', '?', text)
+    text = re.sub(r',+', ',', text)
+    
+    # 5. Fix spacing around punctuation
+    # Prevents WER from penalizing "ajuda ?" vs "ajuda?"
+    text = re.sub(r'\s+([.,?!;:>])', r'\1', text)
+    
+    # 6. Clean up any resulting double spaces
+    text = re.sub(r'\s+', ' ', text)
+    
     return text.strip()
 
 def normalize_special(text):
@@ -219,3 +259,224 @@ def normalize_repeats(seq):
     no_dups1 = remove_duplicates_regex(seq)
     no_dups2 = re.sub(r'\b(\w+)(?:\W+\1\b)+', r'\1', no_dups1, flags=re.IGNORECASE)
     return no_dups2
+
+def remove_duplicates_fuzzy(text: str, max_ngram: int = 5, sim_threshold=90):
+    if not text.strip():
+        return text
+
+    tokens = re.findall(r'\w+|\W+', text, flags=re.UNICODE)
+    word_indices = [i for i, tok in enumerate(tokens) if re.match(r'\w+', tok)]
+    words = [tokens[i] for i in word_indices]
+
+    keep = [True] * len(words)
+    i = 0
+    L = len(words)
+
+    def similar(a, b):
+        return fuzz.partial_ratio(" ".join(a), " ".join(b)) >= sim_threshold
+
+    while i < L:
+        matched = False
+        for n in range(min(max_ngram, L - i), 0, -1):
+            seq = words[i:i+n]
+            j = i + n
+
+            while j + n <= L and similar(seq, words[j:j+n]):
+                j += n
+
+            if j > i + n:
+                for k in range(i + n, j):
+                    keep[k] = False
+                i = j
+                matched = True
+                break
+
+        if not matched:
+            i += 1
+
+    # reconstruct
+    out = []
+    widx = 0
+    for tok in tokens:
+        if re.match(r'\w+', tok):
+            if keep[widx]:
+                out.append(tok)
+            widx += 1
+        else:
+            out.append(tok)
+
+    result = ''.join(out)
+    result = re.sub(r'\s+', ' ', result)
+    result = re.sub(r'\s+([,.;:!?])', r'\1', result)
+    return result.strip()
+
+import string
+
+def remove_asr_hallucination_loops(text, max_phrase_len=10, loop_threshold=2):
+    """
+    Removes repeating n-grams only if they repeat more than `loop_threshold` times.
+    Preserves natural human stutters (e.g., "ele ele") but catches infinite ASR loops.
+    """
+    tokens = text.split()
+    if not tokens:
+        return text
+
+    i = 0
+    result = []
+    
+    while i < len(tokens):
+        best_match_len = 0
+        best_match_count = 0
+
+        # Look for repeating phrases, starting from the largest allowed window down to 1
+        for phrase_len in range(max_phrase_len, 0, -1):
+            if i + phrase_len * 2 > len(tokens): 
+                continue # Not enough words left to form a repeat
+
+            # Clean tokens for comparison (ignore case and punctuation)
+            current_phrase = [t.lower().strip(string.punctuation) for t in tokens[i : i+phrase_len]]
+
+            count = 1
+            curr_idx = i + phrase_len
+            
+            # Count how many times this exact phrase repeats immediately after
+            while curr_idx + phrase_len <= len(tokens):
+                next_phrase = [t.lower().strip(string.punctuation) for t in tokens[curr_idx : curr_idx+phrase_len]]
+                if current_phrase == next_phrase:
+                    count += 1
+                    curr_idx += phrase_len
+                else:
+                    break
+
+            # If the phrase repeats more times than our natural stutter threshold
+            if count > loop_threshold and count > best_match_count:
+                best_match_len = phrase_len
+                best_match_count = count
+
+        if best_match_len > 0:
+            # We found an ASR loop! Keep only one instance of the phrase.
+            result.extend(tokens[i : i+best_match_len])
+            # Skip the pointer past all the hallucinated duplicate blocks
+            i += best_match_len * best_match_count 
+        else:
+            # No loop found, keep the current token and move forward
+            result.append(tokens[i])
+            i += 1
+
+    return " ".join(result)
+
+from rapidfuzz.distance import Levenshtein
+import string
+import unidecode
+
+def normalize_token(t):
+    return unidecode.unidecode(t.lower().strip(string.punctuation))
+
+def is_similar_phrase(a, b, phrase_len):
+    a_str = " ".join(a)
+    b_str = " ".join(b)
+
+    if phrase_len <= 3:
+        return Levenshtein.distance(a_str, b_str) <= 1
+    else:
+        return a == b  # strict for longer phrases
+
+def remove_asr_loops_v2(text, max_phrase_len=10, loop_threshold=2):
+    tokens = text.split()
+    if not tokens:
+        return text
+
+    norm_tokens = [normalize_token(t) for t in tokens]
+
+    i = 0
+    result = []
+
+    while i < len(tokens):
+        best_len = 0
+        best_count = 0
+
+        for phrase_len in range(max_phrase_len, 0, -1):
+            if i + phrase_len * 2 > len(tokens):
+                continue
+
+            base = norm_tokens[i:i+phrase_len]
+
+            count = 1
+            j = i + phrase_len
+
+            while j + phrase_len <= len(tokens):
+                candidate = norm_tokens[j:j+phrase_len]
+
+                if is_similar_phrase(base, candidate, phrase_len):
+                    count += 1
+                    j += phrase_len
+                else:
+                    break
+
+            if count > loop_threshold and count * phrase_len >= 4:
+                if count > best_count:
+                    best_len = phrase_len
+                    best_count = count
+
+        if best_len > 0:
+            result.extend(tokens[i:i+best_len])
+            i += best_len * best_count
+        else:
+            result.append(tokens[i])
+            i += 1
+
+    return " ".join(result)
+
+def remove_asr_hallucination_loops_fast(text, max_ngram_size=10, loop_threshold=2):
+    """
+    Fast contiguous n-gram deduplicator.
+    Identifies and collapses repeating blocks of words (ASR loops) 
+    while preserving natural human disfluencies and stop words.
+    """
+    tokens = text.split()
+    if not tokens:
+        return text
+        
+    n_tokens = len(tokens)
+    
+    # Pre-compute a cleaned version of tokens for fast, punctuation-agnostic comparison.
+    # List comprehensions are highly optimized in Python.
+    norm_tokens = [t.strip(string.punctuation).lower() for t in tokens]
+    
+    result_indices = []
+    i = 0
+    
+    while i < n_tokens:
+        best_n = 0
+        best_count = 0
+        
+        # Check largest possible n-grams first to catch long hallucination loops
+        max_possible_n = min(max_ngram_size, (n_tokens - i) // 2)
+        
+        for n in range(max_possible_n, 0, -1):
+            pattern = norm_tokens[i : i + n]
+            count = 1
+            curr_idx = i + n
+            
+            # Fast sequence comparison (Python does this at C-speed)
+            while curr_idx + n <= n_tokens and norm_tokens[curr_idx : curr_idx + n] == pattern:
+                count += 1
+                curr_idx += n
+                
+            # If the block repeats beyond our natural stutter threshold
+            if count > loop_threshold and count > best_count:
+                best_n = n
+                best_count = count
+                
+        if best_n > 0:
+            # We found an ASR loop! Keep only the first instance of the phrase.
+            result_indices.extend(range(i, i + best_n))
+            # Skip the pointer past all the hallucinated duplicate blocks
+            i += best_n * best_count 
+        else:
+            # No loop found, keep the current token
+            result_indices.append(i)
+            i += 1
+            
+    # Reconstruct the string using the original tokens to preserve formatting
+    return " ".join([tokens[idx] for idx in result_indices])

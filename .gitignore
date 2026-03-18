@@ -3,4 +3,5 @@ hf_models/
 .env
 testing_bench/results/*.csv
 testing_bench/results/*.xlsx
-testing_bench/results2/*
+testing_bench/result*/*.csv
+testing_bench/result*/*.xlsx
