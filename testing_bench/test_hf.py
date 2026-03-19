@@ -14,11 +14,12 @@ import string
 
 import pandas as pd
 
-from utils import (get_inputs, eval_transcriptions, intelligent_chunk_merge, 
+from asr_lib.utils import (get_inputs, eval_transcriptions, intelligent_chunk_merge, 
     clean_reference_text, 
-    normalize_light, normalize_special, normalize_punct, normalize_repeats)
+    normalize_light, normalize_special, normalize_punct, normalize_repeats,
+    save_results)
 
-from torch_asr_utils import (fix_whisper_generation_config, process_with_pipeline, 
+from asr_lib.torch_asr_utils import (fix_whisper_generation_config, process_with_pipeline, 
     load_pipeline, load_asr_generator)
 
 '''"ibm-granite/granite-4.0-1b-speech",#cannot use HF pipeline, not implemented
@@ -364,80 +365,13 @@ def test_model(model_id, n_samples, device, cache_dir=".asr_cache"):
 
     return raw_result_lines, speedup
 
-def save_results(raw_result_lines):
-    df = pd.DataFrame(all_raw_results)
 
-    current_result_n = 0
-    for p in eval_csv_paths:
-        p_n = int(p.split(".")[1])
-        if p_n >= current_result_n:
-            current_result_n = p_n+1
-
-    raw_results_basename = os.path.join(results_dir, f"raw_results.{current_result_n}")
-    eval_basename = os.path.join(results_dir, f"eval_results.{current_result_n}")
-    #save csv and excel
-    df.to_csv(f"{raw_results_basename}.csv", index=False)
-    df.to_excel(f"{raw_results_basename}.xlsx", index=False)
-    
-    eval_lines = []
-
-    for model_id, model_lines in df.groupby('model_id'):
-        print(f"Evaluating {model_id}...")
-        transcribed_norm = model_lines['transcribed_norm'].tolist()
-        texts_original_norm = model_lines['original_norm'].tolist()
-
-        transcribed_special = model_lines['transcribed_special'].tolist()
-        texts_original_special = model_lines['original_special'].tolist()
-
-        transcribed_punct = model_lines['transcribed_punct'].tolist()
-        texts_original_punct = model_lines['original_punct'].tolist()
-
-        transcribed_repeats = model_lines['transcribed_repeats'].tolist()
-        texts_original_repeats = model_lines['original_repeats'].tolist()
-
-        wer_norm = eval_transcriptions(transcribed_norm, texts_original_norm)
-        wer_special = eval_transcriptions(transcribed_special, texts_original_special)
-        wer_punct = eval_transcriptions(transcribed_punct, texts_original_punct)
-        wer_repeats = eval_transcriptions(transcribed_repeats, texts_original_repeats)
-        print(f"\tFinal WER (basic norm): {wer_norm}")
-        print(f"\tFinal WER (special): {wer_special}")
-        print(f"\tFinal WER (punct): {wer_punct}")
-        print(f"\tFinal WER (repeats): {wer_repeats}")
-
-        total_audio_seconds = model_lines['audio_len'].sum()
-        seconds_sum_original = model_lines['processing_time'].sum()
-        seconds_sum_chunked = (model_lines['processing_time'] / model_lines['chunking_speedup']).sum()
-        speed_pipeline = total_audio_seconds / seconds_sum_original
-        #In a real scenario, the audio would arrive already chunked.
-        #Because of this, we need to estimate what would be the total processing time if the audio was already in small chunks.
-        #To do this, we divide the processing time by the speedup factor.
-        speed_chunks = total_audio_seconds / seconds_sum_chunked
-
-        eval_lines.append({
-            "model_id": model_id,
-            "wer_basic_norm": wer_norm,
-            "wer_special": wer_special,
-            "wer_punct": wer_punct,
-            "wer_repeats": wer_repeats,
-            "total_audio_seconds": total_audio_seconds,
-            "total_seconds_pipeline": seconds_sum_original,
-            "total_seconds_chunks": seconds_sum_chunked,
-            "speed_pipeline": speed_pipeline,
-            "speed_chunks": speed_chunks,
-            "n_samples": len(model_lines)
-        })
-    
-    eval_df = pd.DataFrame(eval_lines)
-    #sort df by wer_norm
-    eval_df = eval_df.sort_values(by='wer_basic_norm')
-    eval_df.to_csv(f"{eval_basename}.csv", index=False)
-    eval_df.to_excel(f"{eval_basename}.xlsx", index=False)
 
 if __name__ == "__main__":
     # 1. Load the generic processor and model
     n_samples_to_test = int(sys.argv[1]) if len(sys.argv) > 1 else 429
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    results_dir = "results"
+    results_dir = sys.argv[2] if len(sys.argv) > 2 else "results"
     os.makedirs(results_dir, exist_ok=True)
 
     eval_csv_paths = glob(os.path.join(results_dir, "eval_results.*.csv"))
@@ -477,7 +411,7 @@ if __name__ == "__main__":
                 line['model_id'] = model_id
                 line['chunking_speedup'] = speedup
             all_raw_results.extend(raw_result_lines)
-            save_results(all_raw_results)
+            save_results(all_raw_results, results_dir)
         except Exception as e:
             print(f"Error testing model {model_id}: {e}")
             print(e)

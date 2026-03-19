@@ -1,11 +1,14 @@
 
 import re
-import unidecode
 import string
 import time
 import os
+from glob import glob
+
 from rapidfuzz import fuzz
 from datasets import load_dataset, Audio, load_from_disk
+import pandas as pd
+import unidecode
 
 colunas = [
     "ID",
@@ -480,3 +483,65 @@ def remove_asr_hallucination_loops_fast(text, max_ngram_size=10, loop_threshold=
             
     # Reconstruct the string using the original tokens to preserve formatting
     return " ".join([tokens[idx] for idx in result_indices])
+
+def save_results(raw_result_lines, save_dir):
+    df = pd.DataFrame(raw_result_lines)
+    eval_csv_paths = glob(os.path.join(save_dir, "eval_results.*.csv"))
+    current_result_n = 0
+    for p in eval_csv_paths:
+        p_n = int(p.split(".")[-2])
+        if p_n >= current_result_n:
+            current_result_n = p_n+1
+
+    raw_results_basename = os.path.join(save_dir, f"raw_results.{current_result_n}")
+    eval_basename = os.path.join(save_dir, f"eval_results.{current_result_n}")
+    #save csv and excel
+    df.to_csv(f"{raw_results_basename}.csv", index=False)
+    df.to_excel(f"{raw_results_basename}.xlsx", index=False)
+    
+    eval_lines = []
+
+    col_pairs = [
+        ('wer_raw', 'original', 'transcribed'),
+        ('wer_basic_norm', 'original_norm', 'transcribed_norm'),
+        ('wer_special', 'original_special', 'transcribed_special'),
+        ('wer_punct', 'original_punct', 'transcribed_punct'),
+        ('wer_repeats', 'original_repeats', 'transcribed_repeats'),
+    ]
+
+    if not "chunking_speedup" in df.columns:
+        df["chunking_speedup"] = 1.0
+    else:
+        #fill NaN with 1.0
+        df["chunking_speedup"] = df["chunking_speedup"].fillna(1.0)
+
+    for model_id, model_lines in df.groupby('model_id'):
+        print(f"Evaluating {model_id}...")
+        
+        eval_line = {
+            "model_id": model_id,
+            "n_samples": len(model_lines)
+        }
+        for new_col, original_col, transcribed_col in col_pairs:
+            if original_col in model_lines.columns and transcribed_col in model_lines.columns:
+                transcribed_list = model_lines[transcribed_col].tolist()
+                originals_list = model_lines[original_col].tolist()
+
+                wer_value = eval_transcriptions(transcribed_list, originals_list)
+                print(f"\t{new_col}: {wer_value}")
+                eval_line[new_col] = wer_value
+        eval_line['total_audio_seconds'] = model_lines['audio_len'].sum()
+        eval_line['total_seconds_pipeline'] = model_lines['processing_time'].sum()
+        eval_line['total_seconds_chunks'] = (model_lines['processing_time'] / model_lines['chunking_speedup']).sum()
+        eval_line['speed_pipeline'] = eval_line['total_audio_seconds'] / eval_line['total_seconds_pipeline']
+        eval_line['speed_chunks'] = eval_line['total_audio_seconds'] / eval_line['total_seconds_chunks']
+        #In a real scenario, the audio would arrive already chunked.
+        #Because of this, we need to estimate what would be the total processing time if the audio was already in small chunks.
+        #To do this, we divide the processing time by the speedup factor.
+        eval_lines.append(eval_line)
+    
+    eval_df = pd.DataFrame(eval_lines)
+    #sort df by wer_norm
+    eval_df = eval_df.sort_values(by='wer_raw')
+    eval_df.to_csv(f"{eval_basename}.csv", index=False)
+    eval_df.to_excel(f"{eval_basename}.xlsx", index=False)

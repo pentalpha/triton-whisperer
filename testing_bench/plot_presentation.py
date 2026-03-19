@@ -3,6 +3,30 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 
+def pretty_model_names(model_id):
+    correction_dict = {
+        "hermes-chirp3-us": "Chirp3",
+        "hermes-chirp2-us-central1": "Chirp2",
+        "hermes-telephony-us": "Chirp Telephony",
+    }
+
+    if model_id in correction_dict:
+        return correction_dict[model_id]
+    else:
+        return model_id
+
+def model_family(model_id):
+    #Google Chirp, OpenAI Whisper, Qwen, Meta MMS
+    if "chirp" in model_id.lower() or "telephony" in model_id.lower():
+        return "Google Chirp"
+    elif "whisper" in model_id.lower():
+        return "OpenAI Whisper"
+    elif "qwen" in model_id.lower():
+        return "Qwen"
+    elif "mms" in model_id.lower():
+        return "Meta MMS"
+    else:
+        return "Other"
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
@@ -12,7 +36,8 @@ if __name__ == "__main__":
     df = pd.read_csv(results_path)
     #wer_normalized -> Word Error Rate
     df["Word Error Rate (WER)"] = df["wer_normalized"] * 100
-    df["Nome do Modelo"] = df["model_id"]
+    df["Nome do Modelo"] = df["model_id"].apply(pretty_model_names)
+    df["Família do Modelo"] = df["model_id"].apply(model_family)
 
     #turn wer_no_special, wer_no_punct, wer_no_repeats into percentage of wer_normalized
     df["Porcentagem do WER: Caracteres especiais incorretos (%)"] = (df["wer_normalized"] - df["wer_no_special"]) / df["wer_normalized"] * 100

@@ -12,5 +12,12 @@
             "on_demand": 0.71,
             "spot": 0.26
         }
+    },
+    "commercial_apis": {
+        "hermes-chirp2-us-central1": 0.96,
+        "hermes-chirp3-us": 0.96,
+        "hermes-telephony-us": 0.96,
+        "azure-fast-transcribe": 0.36,
+        "azure-llm-speech": 0.36
     }
 }

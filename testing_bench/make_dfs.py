@@ -5,21 +5,24 @@ import pandas as pd
 import json
 from tqdm import tqdm
 
-from utils import (
+from asr_lib.utils import (
     eval_transcriptions, normalize_special, normalize_punct, normalize_smart_light
 )
-from utils import normalize_smart_light as normalize_light
-from utils import remove_asr_hallucination_loops_fast as normalize_repeats
+from asr_lib.utils import normalize_smart_light as normalize_light
+from asr_lib.utils import remove_asr_hallucination_loops_fast as normalize_repeats
 
 results_required_columns = [
     "audio_len",
     "processing_time",
-    "weight",
     "original",
     "transcribed",
-    "model_id",
-    "chunking_speedup"
+    "model_id"
 ]
+
+columns_fillable = {
+    "weight": 1.0,
+    "chunking_speedup": 1.0
+}
 
 def sort_paths(paths):
     #Sort first by last modification time and then by number at raw_results.{N}.csv
@@ -39,7 +42,10 @@ def load_all_raw_results(results_dir: str):
         df = pd.read_csv(results_file)
         if all(col in df.columns for col in results_required_columns):
             print(f"Loading {results_file}")
-            new_df = df[results_required_columns]
+            for col, default_val in columns_fillable.items():
+                if col not in df.columns:
+                    df[col] = default_val
+            new_df = df[results_required_columns + list(columns_fillable.keys())]
             for model_id, model_rows in new_df.groupby("model_id"):
                 model_dfs[model_id] = model_rows
                 print(f"\tLoaded {model_id}")
@@ -143,19 +149,37 @@ def calc_wer_per_model(df):
     demand_h = min(on_demand)
     spot_h = min(spot)
 
-    #Calculate cost of transcribing 1h of audio for each model using processing_time_chunked
-    eval_df["cost_1h_demand"] = (1/eval_df["speed_chunks"]) * demand_h
-    eval_df["cost_1h_spot"] = (1/eval_df["speed_chunks"]) * spot_h
-    #Calculate cost of whole test set for each model using processing_time_chunked
-    eval_df["cost_test_demand"] = (eval_df["total_seconds_chunks"]/3600) * demand_h
-    eval_df["cost_test_spot"] = (eval_df["total_seconds_chunks"]/3600) * spot_h
-    
+    commercial_libs = pricing["commercial_apis"]
 
+    def add_demand_cost(row):
+        if row["model_id"] in commercial_libs:
+            return commercial_libs[row["model_id"]]
+        else:
+            return (1/row["speed_chunks"]) * demand_h
+    
+    def add_spot_cost(row):
+        if row["model_id"] in commercial_libs:
+            return None
+        else:
+            return (1/row["speed_chunks"]) * spot_h
+    
+    def add_test_cost(row):
+        cost_1h = row['cost_1h']
+        if row["model_id"] in commercial_libs:
+            return row['total_audio_seconds'] / 3600 * cost_1h
+        else:
+            processing_time = row["total_seconds_chunks"]/3600
+            return processing_time * cost_1h
+
+    #Calculate cost of transcribing 1h of audio for each model using processing_time_chunked
+    eval_df["cost_1h"] = eval_df.apply(add_demand_cost, axis=1)
+    eval_df["cost_1h_spot"] = eval_df.apply(add_spot_cost, axis=1)
+    #Calculate cost of whole test set for each model using processing_time_chunked
+    eval_df["cost_test"] = eval_df.apply(add_test_cost, axis=1)
+    
     '''for col in ["no_repeats", "no_repeats_fuzzy", "no_repeats_asr_v2", "no_repeats_asr", "no_repeats_asr_fast"]:
         #Calc improvement over normalized
         eval_df[f"wer_{col}"] = eval_df["wer_normalized"] - eval_df[f"wer_{col}"]'''
-    
-    
 
     return eval_df
 

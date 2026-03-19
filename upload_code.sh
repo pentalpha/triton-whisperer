@@ -3,6 +3,7 @@ from="."
 to="hermes-asr-b.southamerica-east1-b.poc-mj-474517:/home/pita/triton-whisperer"
 
 rsync -zz -zarv --prune-empty-dirs \
-    --exclude="testing_bench/results/*" --exclude="logs/*" --exclude="input/*" \
-    --exclude="*.pyc" --exclude=".git/*" --exclude=".env" \
-    --exclude=".vllm_cache/*" --exclude="*.log" --exclude="hf_cache/*" "$from" "$to"
+    --exclude="testing_bench/results/*" --exclude="*.csv" --exclude="*.xlsx" \
+    --exclude="logs/*" --exclude="input/*" --exclude="*.pyc" \
+    --exclude=".git/*" --exclude=".vllm_cache/*" \
+    --exclude="*.log" --exclude="hf_cache/*" "$from" "$to"
