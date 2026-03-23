@@ -17,6 +17,9 @@ from google.cloud.speech_v2 import types as speech_types
 import soundfile as sf
 from tqdm import tqdm
 from dotenv import load_dotenv
+from azure.core.credentials import AzureKeyCredential
+from azure.ai.transcription import TranscriptionClient
+from azure.ai.transcription.models import TranscriptionContent, TranscriptionOptions, EnhancedModeProperties
 
 # Força o carregamento do arquivo .env
 load_dotenv()
@@ -31,6 +34,9 @@ GCP_RECOGNIZER_ID = os.environ.get("GOOGLE_RECOGNIZER_ID") # e.g., 'chirp-recogn
 
 AZURE_REGION = os.environ.get('AZURE_SERVICE_REGION')
 AZURE_KEY = os.environ.get('AZURE_AI_RESOURCE_KEY')
+
+AZURE_LLM_ENDPOINT = os.environ.get('AZURE_LLM_SPEECH_ENDPOINT')
+AZURE_LLM_KEY = os.environ.get('AZURE_LLM_SPEECH_API_KEY')
 
 def get_audio_id(item):
     """
@@ -80,6 +86,59 @@ def call_azure_api(audio_bytes):
         return transcription, request_time
     else:
         raise Exception(f"Azure API returned status {resp.status_code}")
+
+def call_azure_llm_speech_api(audio_bytes):
+    if not AZURE_LLM_ENDPOINT or not AZURE_LLM_KEY:
+        raise ValueError("Credenciais do AZURE_LLM_SPEECH não encontradas no .env!")
+
+    client = TranscriptionClient(
+        endpoint=AZURE_LLM_ENDPOINT, 
+        credential=AzureKeyCredential(AZURE_LLM_KEY)
+    )
+    
+    # Implementação de Exponential Backoff conforme recomendado pela documentação (preview)
+    backoff_times = [2, 4, 8, 16, 32]
+    
+    for attempt, delay in enumerate(backoff_times + [0]):
+        try:
+            # Envolve os bytes em um objeto similar a arquivo para o SDK
+            audio_stream = io.BytesIO(audio_bytes)
+            audio_stream.name = "audio.wav" # O SDK exige um nome para inferir o formato
+            
+            # Utiliza o "prompt-tuning" sugerido na documentação para guiar o modelo
+            enhanced_mode = EnhancedModeProperties(
+                task="transcribe",
+                prompt=[
+                    "Transcreva o áudio em português do Brasil.",
+                    "O áudio é uma chamada de emergência, capture tudo com precisão."
+                ]
+            )
+            
+            options = TranscriptionOptions(
+                locales=["pt-BR"], 
+                enhanced_mode=enhanced_mode
+            )
+            
+            request_content = TranscriptionContent(
+                definition=options, 
+                audio=audio_stream
+            )
+
+            request_start = time()
+            result = client.transcribe(request_content)
+            request_time = time() - request_start
+            
+            if result and result.combined_phrases:
+                text = " ".join([phrase.text for phrase in result.combined_phrases])
+                return text, request_time
+            return "", request_time
+            
+        except Exception as e:
+            # Se for a última tentativa, repassa o erro para travar a thread
+            if attempt == len(backoff_times):
+                raise e
+            print(f"[WARN] Azure LLM API Rate Limit ou Erro: {e}. Tentando novamente em {delay}s...")
+            sleep(delay)
 
 def call_google_chirp_api(model_id, audio_bytes):
     # Proteção caso o .env falhe
@@ -166,6 +225,10 @@ def process_single_api_sample(idx, item, model_id, cache_dir):
             sleep(1.5)
             transcription, request_time = call_azure_api(audio_bytes_chunk)
             out_text += transcription + "\n"
+            total_latency += request_time
+        elif model_id == "azure-llm-speech":
+            text_part, request_time = call_azure_llm_speech_api(audio_bytes_chunk)
+            out_text += text_part + "\n"
             total_latency += request_time
         elif "chirp" in model_id or "telephony" in model_id:
             transcription, request_time = call_google_chirp_api(model_id, audio_bytes_chunk)
@@ -275,6 +338,8 @@ if __name__ == "__main__":
         "hermes-chirp3-us", 
         "hermes-telephony-us", 
         "hermes-chirp2-us-central1", 
+        "azure-llm-speech",
+
     ]
     all_raw_results = []
     for model_id in api_models:
