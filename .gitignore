@@ -1,3 +1,4 @@
+*.zip
 *.pyc
 hf_models/
 .env
