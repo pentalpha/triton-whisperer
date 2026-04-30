@@ -1,8 +1,6 @@
 FROM nvcr.io/nvidia/tritonserver:24.08-py3
 
-COPY model_repository/whisper_cpu/requirements.txt /models/whisper_cpu/requirements.txt
-RUN pip install -r /models/whisper_cpu/requirements.txt \
-    && rm /models/whisper_cpu/requirements.txt \
+RUN pip install transformers torch numpy requests librosa tritonclient[http] \
     && pip cache purge
 RUN pip install datasets[audio] accelerate \
     && pip cache purge

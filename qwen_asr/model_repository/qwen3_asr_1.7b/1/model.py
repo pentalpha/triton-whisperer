@@ -14,6 +14,10 @@ from time import time
 import numpy as np
 import triton_python_backend_utils as pb_utils
 
+import torch
+import torchvision
+from qwen_asr import Qwen3ASRModel
+
 def load_whisper_cpu(model_name_str, lang):
     from transformers import pipeline
     model = pipeline("automatic-speech-recognition", 
@@ -100,22 +104,21 @@ class TritonPythonModel:
             output_config['data_type']
         )
 
-        self.whisper_mname = "openai/whisper-large-v3-turbo"
+        self.whisper_mname = "Qwen/Qwen3-ASR-1.7B"
         self.language = "pt"
 
-        print(f"Loading whisper model {self.whisper_mname} with language {self.language}...")
+        print(f"Loading qwen model {self.whisper_mname} with language {self.language}...")
         
         print('whisper_worker_process: Starting model loading')
-        self.whisper_model = load_whisper_cuda(self.whisper_mname, self.language)
-        '''
-        from transformers import pipeline
-        self.whisper_model = pipeline("automatic-speech-recognition",
-                                      model=self.whisper_mname,
-                                      return_timestamps=True,
-                                      generate_kwargs={"language": self.language},
-                                      device='cpu')
-        '''
-        print("Loaded whisper model!")
+        
+        self.whisper_model = Qwen3ASRModel.from_pretrained(
+            self.whisper_mname,
+            device_map="cuda:0",
+            # attn_implementation="flash_attention_2",
+            max_inference_batch_size=32, # Batch size limit for inference. -1 means unlimited. Smaller values can help avoid OOM.
+            max_new_tokens=768, # Maximum number of tokens to generate. Set a larger value for long audio input.
+        )
+        print("Loaded qwen model!")
 
     def execute(self, requests):
         responses = []
@@ -123,12 +126,21 @@ class TritonPythonModel:
             input_audio_tensor = pb_utils.get_input_tensor_by_name(request, "INPUT_0")
             audio_input_data = input_audio_tensor.as_numpy()
 
-            start_time = time()
-            print("Starting transcription...")
-            result = self.whisper_model(audio_input_data)
+            chunk_length_s = 30
+            sr = 16000
+            chunk_samples = chunk_length_s * sr
+
+            chunks = [(audio_input_data[i : i + chunk_samples], sr) 
+                      for i in range(0, len(audio_input_data), chunk_samples)]
+            start_time = time.time()
+            result = self.model.transcribe(
+                audio=chunks,
+                language="Portuguese",
+            )
+            
             time_spent = time() - start_time
             print(f"Transcription took {time_spent} seconds")
-            transcript = result['text']
+            transcript = ' '.join([r.text.strip() for r in result])
             transcript = self._remove_duplicates_regex(transcript)
             transcript = self._remove_duplicates_regex_simple(transcript)
 
