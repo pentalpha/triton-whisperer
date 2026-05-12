@@ -3,9 +3,10 @@ import re
 import time
 import threading
 import subprocess
+import sys
+import codecs
 
 import psutil
-import numpy as np
 import librosa
 from flask import Flask, jsonify, request
 from qwen_asr import Qwen3ASRModel
@@ -23,13 +24,12 @@ semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
 # ==========================================
 print("Iniciando o carregamento do modelo Qwen/Qwen3-ASR-1.7B...")
 
-
 global_model = Qwen3ASRModel.from_pretrained(
     "Qwen/Qwen3-ASR-1.7B",
     device_map="cuda:0",
     # attn_implementation="flash_attention_2",
-    max_inference_batch_size=32,
-    max_new_tokens=768,
+    max_inference_batch_size=32,  # Batch size limit for inference. -1 means unlimited. Smaller values can help avoid OOM.
+    max_new_tokens=768,  # Maximum number of tokens to generate. Set a larger value for long audio input.
 )
 print("Modelo carregado com sucesso na GPU!")
 
@@ -155,7 +155,7 @@ def asr_infer():
             audio_input_data, sr = librosa.load(audio_file, sr=16000)
 
             # 2. Lógica de chunking do seu código original
-            chunk_length_s = 30
+            chunk_length_s = 29
             chunk_samples = chunk_length_s * sr
 
             chunks = [
@@ -172,6 +172,20 @@ def asr_infer():
             transcript = " ".join([r.text.strip() for r in result])
 
             time_spent = time.time() - start_time
+
+            print(type(transcript), repr(transcript), file=sys.stderr)
+            print("Raw transcript repr:", repr(transcript), file=sys.stderr)
+
+            # If transcript literally contains escape sequences like \xc9, unescape them
+            if isinstance(transcript, str) and r"\x" in transcript:
+                print("Scaped str", file=sys.stderr)
+                transcript = codecs.decode(transcript, "unicode_escape")
+            elif isinstance(transcript, bytes):
+                print("bytes str", file=sys.stderr)
+                transcript = transcript.decode("utf-8")
+
+            print("Fixed transcript:", transcript, file=sys.stderr)
+
             print(
                 f"Transcrição de {len(chunks)} chunks levou {time_spent:.2f} segundos"
             )
