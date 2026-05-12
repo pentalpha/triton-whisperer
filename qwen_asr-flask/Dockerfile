@@ -14,10 +14,18 @@ RUN python3 -c "import torch; import torchvision; print(torchvision.ops.nms(torc
 RUN pip install -U qwen-asr  --ignore-installed blinker --break-system-packages
 RUN python3 -c "import torch; import torchvision; print(torchvision.ops.nms(torch.zeros(1,4), torch.ones(1), 0.5))"
 
-RUN pip flask psutil --break-system-packages
+RUN pip install flask psutil gunicorn --break-system-packages
 
-COPY server.py /server.py
+WORKDIR /app
+# Copia o código para dentro do diretório /app
+COPY server.py /app/server.py
+
 EXPOSE 8000
 
-CMD ["python3 /server.py"]
-
+# --- GUNICORN WORKERS ---
+# Ajuste a seguir baseando-se na VRAM da sua GPU:
+# - Se tiver GPU de 8GB: use --workers 1
+# - Se tiver GPU de 16GB+: pode tentar --workers 2 (ou mais, se couber)
+# Cada worker roda como um processo separado e carrega o modelo.
+# O --threads é mantido em 16 para paralelismo dentro do processo.
+CMD ["gunicorn", "--workers", "1", "--threads", "16", "--timeout", "300", "--bind", "0.0.0.0:8000", "server:app"]

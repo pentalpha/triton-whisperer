@@ -10,13 +10,16 @@ import psutil
 import librosa
 from flask import Flask, jsonify, request
 from qwen_asr import Qwen3ASRModel
+import subprocess
+import numpy as np
 
 app = Flask(__name__)
-
+app.json.ensure_ascii = False
 # ==========================================
 # 1. Configurações Globais e Limite de Concorrência
 # ==========================================
 MAX_CONCURRENT_REQUESTS = 16
+USE_LIBROSA = False
 semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 # ==========================================
@@ -37,6 +40,50 @@ print("Modelo carregado com sucesso na GPU!")
 # ==========================================
 # 3. Funções Auxiliares de Pós-processamento
 # ==========================================
+def load_audio_fast(file_stream, target_sr=16000):
+    """
+    Lê o arquivo de áudio da memória via pipe, usa o FFmpeg para converter
+    para PCM 16-bit Mono no Sample Rate alvo, e retorna um NumPy array float32.
+    """
+    command = [
+        "ffmpeg",
+        "-i",
+        "pipe:0",  # Lê a entrada padrão (stdin)
+        "-f",
+        "s16le",  # Força saída PCM 16-bit little-endian
+        "-acodec",
+        "pcm_s16le",  # Codec de áudio
+        "-ar",
+        str(target_sr),  # Sample rate (16000)
+        "-ac",
+        "1",  # 1 canal (Mono)
+        "-loglevel",
+        "quiet",  # Silencia os logs do ffmpeg no terminal
+        "-",  # Envia a saída para o stdout
+    ]
+
+    # Executa o FFmpeg passando os bytes do Flask diretamente para o processo
+    process = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+
+    # file_stream.read() pega os bytes do request.files
+    out, err = process.communicate(input=file_stream.read())
+
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"Falha ao decodificar áudio com FFmpeg: {err.decode('utf-8')}"
+        )
+
+    # Converte os bytes brutos para um array NumPy int16
+    audio_data = np.frombuffer(out, dtype=np.int16)
+
+    # Normaliza para float32 no intervalo [-1.0, 1.0], que é o padrão esperado pelos modelos ASR
+    audio_data = audio_data.astype(np.float32) / 32768.0
+
+    return audio_data, target_sr
+
+
 def remove_duplicates_regex(text: str, max_ngram: int = 5) -> str:
     """Remove repetições consecutivas de n-gramas (1..max_ngram)."""
     if not text or text.strip() == "":
@@ -132,6 +179,7 @@ def gpu():
 
 @app.route("/transcribe", methods=["POST"])
 def asr_infer():
+    all_start = time.time()
     # Verifica se um arquivo de áudio foi enviado na requisição POST
     if "audio" not in request.files:
         return (
@@ -144,6 +192,7 @@ def asr_infer():
             400,
         )
 
+    load_start = time.time()
     audio_file = request.files["audio"]
 
     # O Semaphore garante que no máximo 16 threads passem deste ponto simultaneamente.
@@ -152,9 +201,14 @@ def asr_infer():
         try:
             # 1. Carregar o áudio e garantir o Sample Rate de 16kHz
             # librosa.load converte automaticamente para mono e faz o resample para sr=16000
-            audio_input_data, sr = librosa.load(audio_file, sr=16000)
+            if USE_LIBROSA:
+                audio_input_data, sr = librosa.load(audio_file, sr=16000)
+            else:
+                audio_input_data, sr = load_audio_fast(audio_file, target_sr=16000)
+            load_end = time.time() - load_start
 
             # 2. Lógica de chunking do seu código original
+            chunking_start = time.time()
             chunk_length_s = 29
             chunk_samples = chunk_length_s * sr
 
@@ -162,6 +216,7 @@ def asr_infer():
                 (audio_input_data[i : i + chunk_samples], sr)
                 for i in range(0, len(audio_input_data), chunk_samples)
             ]
+            chunking_end = time.time() - chunking_start
 
             start_time = time.time()
 
@@ -187,18 +242,28 @@ def asr_infer():
             print("Fixed transcript:", transcript, file=sys.stderr)
 
             print(
-                f"Transcrição de {len(chunks)} chunks levou {time_spent:.2f} segundos"
+                f"Transcrição de {len(chunks)} chunks levou {time_spent:.2f} segundos",
+                file=sys.stderr,
             )
 
             # 4. Pós-processamento de texto
             transcript = remove_duplicates_regex(transcript)
             transcript = remove_duplicates_regex_simple(transcript)
 
+            print("Transcript no repeats:", transcript, file=sys.stderr)
+            all_end = time.time() - all_start
+            print("Total time:", all_end, file=sys.stderr)
             return jsonify(
                 {
                     "status": "success",
                     "transcription": transcript,
-                    "inference_time_seconds": round(time_spent, 2),
+                    "inference_seconds": round(time_spent, 2),
+                    "file_load_seconds": round(load_end, 2),
+                    "chunking_seconds": round(chunking_end, 2),
+                    "other_processing_seconds": round(
+                        all_end - time_spent - load_end - chunking_end, 2
+                    ),
+                    "total_seconds": round(all_end, 2),
                 }
             )
 
