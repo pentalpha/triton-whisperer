@@ -1,102 +1,33 @@
 import json
-import sys
 from time import sleep
 import re
-
-#mp.set_start_method('spawn', force=True)
-#print("spawned")
+import sys
+import os
+import base64
+import codecs
 
 from time import time
-
-#import logging
-
-#import requests
 import numpy as np
 import triton_python_backend_utils as pb_utils
 
-import torch
-import torchvision
+# --- FIX FOR CIRCULAR IMPORT ---
+# Temporarily remove Triton's model directory from sys.path so the 'qwen_asr' 
+# package doesn't accidentally import this file when looking for its own 'model.py'.
+_current_dir = os.path.dirname(os.path.realpath(__file__))
+if _current_dir in sys.path:
+    sys.path.remove(_current_dir)
+
+# Now it is safe to import your package
 from qwen_asr import Qwen3ASRModel
 
-def load_whisper_cpu(model_name_str, lang):
-    from transformers import pipeline
-    model = pipeline("automatic-speech-recognition", 
-            model=model_name_str,
-            return_timestamps=True,
-            generate_kwargs={"language": lang},
-            device='cpu')
-    return model
-
-def load_whisper_cuda(model_name_str, lang):
-    print(f'Loading whisper model {model_name_str}...')
-    from transformers import pipeline
-
-    try:
-        model = pipeline("automatic-speech-recognition", 
-            model=model_name_str,
-            return_timestamps=True,
-            #generate_kwargs={"language": lang},
-            device='cuda')
-    except Exception as e:
-        print(f"Error loading Whisper model {model_name_str}: {e}", file=sys.stderr)
-        print('Falling back to CPU...', file=sys.stderr)
-        # If CUDA is not available, load the model on CPU
-        model = load_whisper_cpu(model_name_str, lang)
-    print('Loaded whisper model...')
-    return model
-
-def whisper_worker_process(whisper_mname, audio_queue, result_queue, 
-        language):
-    # Cada worker carrega seu próprio modelo
-    #calls_being_processed_lockset[worker_index] = -1
-    print('whisper_worker_process: Starting model loading')
-    whisper_model = load_whisper_cuda(whisper_mname, language)
-
-    print('Loaded model!')
-    while True:
-        audio_id, id_emergencia, start_time, sampling_rate, audio_path = audio_queue.get()
-        try:
-            if audio_path == "STOP":
-                break
-            start_time = time()
-            result = whisper_model(audio_path)
-            time_spent = time() - start_time
-            transcript = result['text']
-            transcript = remove_duplicates_regex(transcript)
-            transcript = remove_duplicates_regex_simple(transcript)
-            result = {
-                'audio_id': audio_id,
-                'id_emergencia': id_emergencia,
-                'part': transcript,
-                'start_time': start_time,
-                'transcription_seconds': time_spent,
-                'transcription_model': whisper_mname
-            }
-            #print(f'result: {result}')
-            result_queue.put(result)
-        except Exception as err:
-            print(f'Error processing audio {audio_path}, removing processing_running flag')
-            print(f'transcript: {transcript}')
-            print(f'Erro: {err}')
-            print(err)
-            print(err.with_traceback(None))
-            result_queue.put({
-                'audio_id': audio_id,
-                'id_emergencia': id_emergencia,
-                'part': '',
-                'start_time': None,
-                'transcription_seconds': 0.0,
-                'transcription_model': whisper_mname,
-                "error": str(err)
-            })
-            sleep(5)
-
-        sleep(0.05)
+# Restore the directory back to sys.path
+sys.path.insert(0, _current_dir)
+# -------------------------------
 
 
 class TritonPythonModel:
     def initialize(self, args):
-        self.model_config = model_config = json.loads(args['model_config'])
+        self.qwen_model_config = model_config = json.loads(args['model_config'])
         output_config = pb_utils.get_output_config_by_name(
             model_config, "OUTPUT_0"
         )
@@ -111,7 +42,7 @@ class TritonPythonModel:
         
         print('whisper_worker_process: Starting model loading')
         
-        self.whisper_model = Qwen3ASRModel.from_pretrained(
+        self.qwen_model = Qwen3ASRModel.from_pretrained(
             self.whisper_mname,
             device_map="cuda:0",
             # attn_implementation="flash_attention_2",
@@ -132,8 +63,8 @@ class TritonPythonModel:
 
             chunks = [(audio_input_data[i : i + chunk_samples], sr) 
                       for i in range(0, len(audio_input_data), chunk_samples)]
-            start_time = time.time()
-            result = self.model.transcribe(
+            start_time = time()
+            result = self.qwen_model.transcribe(
                 audio=chunks,
                 language="Portuguese",
             )
@@ -143,13 +74,35 @@ class TritonPythonModel:
             transcript = ' '.join([r.text.strip() for r in result])
             transcript = self._remove_duplicates_regex(transcript)
             transcript = self._remove_duplicates_regex_simple(transcript)
+            
+            print(type(transcript), repr(transcript), file=sys.stderr)
+            print("Raw transcript repr:", repr(transcript), file=sys.stderr)
 
-            # Encode transcript to bytes for Triton output
-            output_transcript = np.array([transcript.encode('utf-8')], dtype=self.output_dtype)
+            # If transcript literally contains escape sequences like \xc9, unescape them
+            if isinstance(transcript, str) and r"\x" in transcript:
+                print("Scaped str", file=sys.stderr)
+                transcript = codecs.decode(transcript, "unicode_escape")
+            elif isinstance(transcript, bytes):
+                print("bytes str", file=sys.stderr)
+                transcript = transcript.decode("utf-8")
 
-            inference_response = pb_utils.InferenceResponse(output_tensors=[
-                pb_utils.Tensor("OUTPUT_0", output_transcript)
-            ])
+            print("Fixed transcript:", transcript, file=sys.stderr)
+            encoded = transcript.encode("utf-8")
+
+            output_transcript = np.frombuffer(
+                encoded,
+                dtype=np.uint8
+            ).copy()
+
+            print(output_transcript, file=sys.stderr)
+            print(output_transcript.shape, file=sys.stderr)
+            print(output_transcript.dtype, file=sys.stderr)
+
+            inference_response = pb_utils.InferenceResponse(
+                output_tensors=[
+                    pb_utils.Tensor("OUTPUT_0", output_transcript)
+                ]
+            )
             responses.append(inference_response)
         return responses
 

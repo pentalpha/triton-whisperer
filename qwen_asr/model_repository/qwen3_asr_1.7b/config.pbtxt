@@ -13,8 +13,8 @@ input [
 output [
   {
     name: "OUTPUT_0"
-    data_type: TYPE_STRING
-    dims: [ 1 ]
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
   }
 ]
 

@@ -1,4 +1,5 @@
 import argparse
+import base64
 import glob
 import os
 import threading
@@ -11,10 +12,13 @@ import io
 import soundfile as sf
 from pydub import AudioSegment
 
+from asr_lib.audio_processing import prepare_audios_for_triton
+
 if not os.getenv("TRITON_SERVER_URL"):
     os.environ["TRITON_SERVER_URL"] = "localhost:8000"
 
-MODEL_NAME = "turbo_cuda"
+#MODEL_NAME = "turbo_cuda"
+MODEL_NAME = "qwen3_asr_1.7b"
 TRITON_SERVER_URL = os.environ["TRITON_SERVER_URL"] 
 timeout_secs = 240
 #Baseado em: https://cloud.google.com/products/calculator?hl=pt_br&dl=CjhDaVF6TXpZNFl6RmlNQzB6TnpSaUxUUTVNVEl0T0RWaVl5MWxNbVkzWW1VeFkyRmtaallRQVE9PRAIGiRDODBGMjI5RS02MjExLTQ5QUMtOUU2Ri0zNzBBRTJFODkyOEM
@@ -41,21 +45,36 @@ def preprocess_audio(audio_path, audio_format):
         print(audio.shape, sr)
         
     length_seconds = len(audio) / sr
-    return audio.astype(np.float32), length_seconds
+    np_audio = audio.astype(np.float32)
+    audios, lengths = prepare_audios_for_triton(np_audio, 16000, max_len_sec=24.0)
+    return audios, lengths
 
 def process_audios(filepaths: List[str]):
     results = []
     for filepath in filepaths:
-        audio_input_data, length_seconds = preprocess_audio(filepath, None)
-        results.append((filepath, audio_input_data, length_seconds))
+        audio_input_datas, lengths_seconds = preprocess_audio(filepath, None)
+        results.append((filepath, audio_input_datas, lengths_seconds))
     return results
 
-def asr_thread(filepath, audio_input_data, length_seconds, results_list):
-    try:
-        client = http_client.InferenceServerClient(url=TRITON_SERVER_URL,
-            connection_timeout=timeout_secs,
-            network_timeout=timeout_secs)
-        
+def asr_thread(filepath, audio_input_datas, lengths_seconds, results_list):
+    #try:
+    '''outputs = [
+        http_client.InferRequestedOutput("OUTPUT_0", binary_data=True)
+    ]'''
+    '''outputs = [
+        http_client.InferRequestedOutput("OUTPUT_0", binary_data=False)
+    ]'''
+    client = http_client.InferenceServerClient(url=TRITON_SERVER_URL,
+        connection_timeout=timeout_secs,
+        network_timeout=timeout_secs)
+    
+    audios_iter = zip(audio_input_datas, lengths_seconds)
+
+    index = 0
+    full_transcription = ""
+    for audio_input_data, length_seconds in audios_iter:
+        index += 1
+    
         # Create input tensor
         inputs = [
             http_client.InferInput(
@@ -66,7 +85,8 @@ def asr_thread(filepath, audio_input_data, length_seconds, results_list):
 
         # Send request
         infer_start_time = time()
-        results = client.infer(model_name=MODEL_NAME, inputs=inputs, 
+        results = client.infer(model_name=MODEL_NAME, inputs=inputs,
+                               outputs=[http_client.InferRequestedOutput("OUTPUT_0", binary_data=True)],
                                timeout=timeout_secs*1000)
         infer_time_spent = time() - infer_start_time
         print(f"Inference took {infer_time_spent} seconds")
@@ -77,24 +97,43 @@ def asr_thread(filepath, audio_input_data, length_seconds, results_list):
         print(f"hour cost: {hour_cost} dollars per hour of transcription")
 
         # Get output
+        print(results)
+        print("RAW RESPONSE:", results.get_response())
+        print("Full results object:", results)
+        print("Output names:", results.get_response()['outputs'])
+
+        raw_json = results.get_response()
+        out_info = next(o for o in raw_json['outputs'] if o['name'] == 'OUTPUT_0')
+        print(out_info)
+
+        res1 = results.get_output("OUTPUT_0")
+        print(res1)
+
         output_data = results.as_numpy("OUTPUT_0")
-        transcription = output_data[0].decode('utf-8')
-        print(f"Transcription for audio {filepath}: {transcription}")
 
-        # Optionally, save transcription to a file
-        output_txt_file = os.path.splitext(filepath)[0] + ".txt"
-        with open(output_txt_file, "w", encoding="utf-8") as f:
-            f.write(transcription)
-        print(f"Transcription saved to {output_txt_file}")
-        results_list.append((infer_time_spent, length_seconds))
+        print(output_data)
+        print(output_data.shape)
+        print(output_data.dtype)
 
-    except Exception as e:
+        transcription = bytes(output_data.tolist()).decode("utf-8")
+        full_transcription += "\n" +  transcription
+        print(f"Transcription for audio {filepath}[{index}]: {transcription}")
+        quit(1)
+
+    # Optionally, save transcription to a file
+    output_txt_file = os.path.splitext(filepath)[0] + ".txt"
+    with open(output_txt_file, "w", encoding="utf-8") as f:
+        f.write(transcription)
+    print(f"Transcription saved to {output_txt_file}")
+    results_list.append((infer_time_spent, length_seconds))
+
+    '''except Exception as e:
         print(f"Error processing audio {filepath}: {e}")
         
         infer_time_spent = time() - infer_start_time
         print(f"Inference took {infer_time_spent} seconds")
         
-        results_list.append((None, length_seconds))
+        results_list.append((None, length_seconds))'''
 
 def main():
     parser = argparse.ArgumentParser(description="Triton Whisper Client for WAV files.")
@@ -114,7 +153,7 @@ def main():
     audio_files = wav_files + mp3_files
 
     print(f"Found {len(audio_files)} files. Sending to Triton server...")
-
+    audio_files = [audio_files[0]]
     processed_audios = process_audios([p for p, f in audio_files])
     index = 0
     threads: List[threading.Thread] = []
@@ -129,6 +168,7 @@ def main():
         sleep(1.0)
 
         index += 1
+        quit(1)
     for thread in threads:
         thread.join()
     seconds_of_inference = time() - inferences_start

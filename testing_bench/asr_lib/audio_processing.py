@@ -135,3 +135,42 @@ def prepare_audio_for_apis(audio_array, sr, max_len_sec=29.9, verbose=False):
         byte_chunks.append(buffer.getvalue())
         
     return byte_chunks
+
+def prepare_audios_for_triton(audio_array, sr, max_len_sec=29.9, verbose=False):
+    """
+    Recebe o numpy array do dataset e devolve lista de numpy arrays de comprimento menor.
+    """
+    max_len_ms = int(max_len_sec * 1000)
+    
+    # 1. Array -> Pydub
+    audio_segment = array_to_audiosegment(audio_array, sr)
+    
+    # 2. Fase Atômica (Quebra nos silêncios)
+    atomic_chunks = get_atomic_chunks(audio_segment, max_len_ms=max_len_ms)
+
+    if verbose:
+        print(f"Atomic chunk lengths: {[len(c) for c in atomic_chunks]}")
+    
+    # 3. Fase Empacotamento (Junta até 29.9s)
+    final_segments = pack_audio_chunks(atomic_chunks, max_len_ms=max_len_ms, min_len_ms=2000)
+
+    if verbose:
+        print(f"Final segment lengths: {[len(c) for c in final_segments]}")
+    
+    # 4. Pydub -> Lista de np.ndarray
+    chunks = []
+    lens_seconds = []
+    for seg in final_segments:
+        buffer = io.BytesIO()
+        seg.export(buffer, format="wav")
+        buffer.seek(0)
+        
+        # Lê o buffer wav de volta para um numpy array. 
+        # dtype='float32' é o padrão esperado pela maioria dos modelos acústicos no Triton
+        audio_np, _ = sf.read(buffer, dtype='float32')
+        
+        chunks.append(audio_np)
+        # O len() do pydub retorna a duração em milissegundos
+        lens_seconds.append(len(seg) / 1000.0)
+        
+    return chunks, lens_seconds
