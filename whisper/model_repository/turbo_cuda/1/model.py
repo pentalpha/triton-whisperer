@@ -120,10 +120,10 @@ class TritonPythonModel:
             audio_input_data = input_audio_tensor.as_numpy()
 
             start_time = time()
-            print("Starting transcription...")
+            print("Starting transcription...", file=sys.stderr)
             result = self.whisper_model(audio_input_data)
             time_spent = time() - start_time
-            print(f"Transcription took {time_spent} seconds")
+            print(f"Transcription took {time_spent} seconds", file=sys.stderr)
             transcript = result['text']
             transcript = self._remove_duplicates_regex(transcript)
             transcript = self._remove_duplicates_regex_simple(transcript)
@@ -135,6 +135,7 @@ class TritonPythonModel:
                 pb_utils.Tensor("OUTPUT_0", output_transcript)
             ])
             responses.append(inference_response)
+        print(f"Returning {len(responses)} responses", file=sys.stderr)
         return responses
 
     def finalize(self):

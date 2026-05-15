@@ -5,6 +5,7 @@ import threading
 import subprocess
 import sys
 import codecs
+import gc
 
 import psutil
 import librosa
@@ -12,25 +13,26 @@ from flask import Flask, jsonify, request
 from qwen_asr import Qwen3ASRModel
 import subprocess
 import numpy as np
+import torch
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
 # ==========================================
 # 1. Configurações Globais e Limite de Concorrência
 # ==========================================
-MAX_CONCURRENT_REQUESTS = 16
 USE_LIBROSA = False
-semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 # ==========================================
 # 2. Carregamento do Modelo (Única Instância)
 # ==========================================
 print("Iniciando o carregamento do modelo Qwen/Qwen3-ASR-1.7B...")
 
-global_model = Qwen3ASRModel.from_pretrained(
+global_model = Qwen3ASRModel.LLM(
     "Qwen/Qwen3-ASR-1.7B",
-    device_map="cuda:0",
-    # attn_implementation="flash_attention_2",
+    gpu_memory_utilization=0.95,
+    dtype="half",
+    max_model_len=8000,
+    # attn_implementation="sdpa",
     max_inference_batch_size=32,  # Batch size limit for inference. -1 means unlimited. Smaller values can help avoid OOM.
     max_new_tokens=768,  # Maximum number of tokens to generate. Set a larger value for long audio input.
 )
@@ -195,88 +197,83 @@ def asr_infer():
     load_start = time.time()
     audio_file = request.files["audio"]
 
-    # O Semaphore garante que no máximo 16 threads passem deste ponto simultaneamente.
-    # A 17ª ficará em modo de espera (bloqueada) até que uma das 16 termine e chame release().
-    with semaphore:
-        try:
-            # 1. Carregar o áudio e garantir o Sample Rate de 16kHz
-            # librosa.load converte automaticamente para mono e faz o resample para sr=16000
-            if USE_LIBROSA:
-                audio_input_data, sr = librosa.load(audio_file, sr=16000)
-            else:
-                audio_input_data, sr = load_audio_fast(audio_file, target_sr=16000)
-            load_end = time.time() - load_start
+    try:
+        # 1. Carregar o áudio e garantir o Sample Rate de 16kHz
+        # librosa.load converte automaticamente para mono e faz o resample para sr=16000
+        if USE_LIBROSA:
+            audio_input_data, sr = librosa.load(audio_file, sr=16000)
+        else:
+            audio_input_data, sr = load_audio_fast(audio_file, target_sr=16000)
+        load_end = time.time() - load_start
 
-            # 2. Lógica de chunking do seu código original
-            chunking_start = time.time()
-            chunk_length_s = 29
-            chunk_samples = chunk_length_s * sr
+        # 2. Lógica de chunking do seu código original
+        chunking_start = time.time()
+        chunk_length_s = 29
+        chunk_samples = chunk_length_s * sr
 
-            chunks = [
-                (audio_input_data[i : i + chunk_samples], sr)
-                for i in range(0, len(audio_input_data), chunk_samples)
-            ]
-            chunking_end = time.time() - chunking_start
+        chunks = [
+            (audio_input_data[i : i + chunk_samples], sr)
+            for i in range(0, len(audio_input_data), chunk_samples)
+        ]
+        chunking_end = time.time() - chunking_start
 
-            start_time = time.time()
+        start_time = time.time()
 
-            result = global_model.transcribe(
-                audio=chunks,
-                language="Portuguese",
-            )
-            transcript = " ".join([r.text.strip() for r in result])
+        result = global_model.transcribe(
+            audio=chunks,
+            language="Portuguese",
+        )
+        time_spent = time.time() - start_time
+        transcript = " ".join([r.text.strip() for r in result])
 
-            time_spent = time.time() - start_time
+        print(type(transcript), repr(transcript), file=sys.stderr)
+        print("Raw transcript repr:", repr(transcript), file=sys.stderr)
 
-            print(type(transcript), repr(transcript), file=sys.stderr)
-            print("Raw transcript repr:", repr(transcript), file=sys.stderr)
+        # If transcript literally contains escape sequences like \xc9, unescape them
+        if isinstance(transcript, str) and r"\x" in transcript:
+            print("Scaped str", file=sys.stderr)
+            transcript = codecs.decode(transcript, "unicode_escape")
+        elif isinstance(transcript, bytes):
+            print("bytes str", file=sys.stderr)
+            transcript = transcript.decode("utf-8")
 
-            # If transcript literally contains escape sequences like \xc9, unescape them
-            if isinstance(transcript, str) and r"\x" in transcript:
-                print("Scaped str", file=sys.stderr)
-                transcript = codecs.decode(transcript, "unicode_escape")
-            elif isinstance(transcript, bytes):
-                print("bytes str", file=sys.stderr)
-                transcript = transcript.decode("utf-8")
+        print("Fixed transcript:", transcript, file=sys.stderr)
 
-            print("Fixed transcript:", transcript, file=sys.stderr)
+        print(
+            f"Transcrição de {len(chunks)} chunks levou {time_spent:.2f} segundos",
+            file=sys.stderr,
+        )
 
-            print(
-                f"Transcrição de {len(chunks)} chunks levou {time_spent:.2f} segundos",
-                file=sys.stderr,
-            )
+        # 4. Pós-processamento de texto
+        transcript = remove_duplicates_regex(transcript)
+        transcript = remove_duplicates_regex_simple(transcript)
 
-            # 4. Pós-processamento de texto
-            transcript = remove_duplicates_regex(transcript)
-            transcript = remove_duplicates_regex_simple(transcript)
-
-            print("Transcript no repeats:", transcript, file=sys.stderr)
-            all_end = time.time() - all_start
-            print("Total time:", all_end, file=sys.stderr)
-            return jsonify(
-                {
-                    "status": "success",
-                    "transcription": transcript,
-                    "inference_seconds": round(time_spent, 2),
-                    "file_load_seconds": round(load_end, 2),
-                    "chunking_seconds": round(chunking_end, 2),
-                    "other_processing_seconds": round(
-                        all_end - time_spent - load_end - chunking_end, 2
-                    ),
-                    "total_seconds": round(all_end, 2),
-                }
-            )
-
-        except Exception as e:
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": str(e),
-                    }
+        print("Transcript no repeats:", transcript, file=sys.stderr)
+        all_end = time.time() - all_start
+        print("Total time:", all_end, file=sys.stderr)
+        return jsonify(
+            {
+                "status": "success",
+                "transcription": transcript,
+                "inference_seconds": round(time_spent, 2),
+                "file_load_seconds": round(load_end, 2),
+                "chunking_seconds": round(chunking_end, 2),
+                "other_processing_seconds": round(
+                    all_end - time_spent - load_end - chunking_end, 2
                 ),
-                500,
-            )
+                "total_seconds": round(all_end, 2),
+            }
+        )
+    except Exception as e:
+        print(f"Erro no vLLM/Servidor: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    finally:
+        # Limpamos apenas a RAM local (dados do áudio original)
+        if "audio_input_data" in locals():
+            del audio_input_data
+        if "chunks" in locals():
+            del chunks
 
 
 if __name__ == "__main__":

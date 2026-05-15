@@ -28,4 +28,4 @@ EXPOSE 8000
 # - Se tiver GPU de 16GB+: pode tentar --workers 2 (ou mais, se couber)
 # Cada worker roda como um processo separado e carrega o modelo.
 # O --threads é mantido em 16 para paralelismo dentro do processo.
-CMD ["gunicorn", "--workers", "1", "--threads", "16", "--timeout", "300", "--bind", "0.0.0.0:8000", "server:app"]
+CMD ["gunicorn", "--workers", "2", "--threads", "16", "--timeout", "300", "--bind", "0.0.0.0:8000", "server:app"]
