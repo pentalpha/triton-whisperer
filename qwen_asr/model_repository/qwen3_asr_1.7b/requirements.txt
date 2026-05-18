@@ -1,6 +1,0 @@
-transformers
-torch
-numpy
-requests
-librosa
-tritonclient[http]
