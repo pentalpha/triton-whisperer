@@ -11,3 +11,4 @@ testing_bench/inputs/*
 testing_bench/results/*
 *.parquet
 *.arrow
+*.bin
