@@ -35,12 +35,6 @@ RUN pip install --no-cache-dir numpy requests librosa psutil flask gunicorn --ig
 # O vLLM será compilado/configurado aqui. Ter o nvcc no path resolve o erro do flashinfer.
 RUN pip install --no-cache-dir -U qwen-asr[vllm] --ignore-installed blinker --break-system-packages
 
-WORKDIR /app
-COPY server.py /app/server.py
-
 EXPOSE 8000
 
-# Mantemos a configuração de workers. 
-# Nota: Com vLLM, --threads 8 é um bom equilíbrio para o Flask não engasgar.
-#CMD ["gunicorn", "--workers", "1", "--threads", "6", "--timeout", "300", "--bind", "0.0.0.0:8000", "server:app"]
 CMD ["qwen-asr-serve", "Qwen/Qwen3-ASR-1.7B", "--gpu-memory-utilization", "0.97", "--host", "0.0.0.0", "--port", "8000", "--max-model-len", "8000", "--dtype", "half", "--max-num-seqs", "16"]
